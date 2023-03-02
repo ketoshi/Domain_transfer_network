@@ -12,8 +12,7 @@ import csv
 from torchinfo import summary
 
 sys.path.append('data')
-from dataloader import *
-
+from dataset import *
 
 #------------functions----------------------
 def convolution_downscale_factor_2(in_channels, out_channels, kernel_size=3):
@@ -69,8 +68,9 @@ def upscale_layer(in_channels, out_channels, should_upscale = True):
 
 #---------------classes------------------
 class Encoder(nn.Module):
-    def __init__(self, layer_channels=(3,64,128,256,512)):
+    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
         super().__init__()
+        self.outputs = []
         inputs = []
         for i in range(0, len(layer_channels)-1):
             l1 = layer_channels[i]
@@ -78,48 +78,57 @@ class Encoder(nn.Module):
             inputs.append( downscale_layer(l1,l2,False) )
             inputs.append( downscale_layer(l2,l2,True) )
         self.model = nn.Sequential(*inputs)
-        #self.output_layers = [] #add for decoder
+        self.skip_layers = [2*x+1 for x in skip_layers]
 
     def forward(self, x):
-        for layer in self.model:
-            x = layer(x)
-        return x
+        for i_layer in range(len(self.model)):
+            x = self.model[i_layer](x)
+            if i_layer in self.skip_layers: 
+                self.outputs.append(x)
+        self.outputs.append(x)
+        return self.outputs
 
-#u-net has conv kernel=1x1   at last step, might be worth to atleast try
+#u-net has conv kernel=1x1   at last step maybe
+
 class Shared_Decoder(nn.Module):
-    def __init__(self, layer_channels=(512,256,128,64,3)):
+    def __init__(self, layer_channels=(512,256,128,64,3), skip_layers=[-1]):
         super().__init__()
         inputs = []
         layer_channels = list(layer_channels)
-        layer_channels[0]*=2 #need to double more layers if i use skip connections
+        skip_layers = [(len(layer_channels)-2) - x for x in skip_layers]
+        
+        l1 = layer_channels[0]
+        inputs.append( upscale_layer(2*l1,  l1,False) )
         for i in range(0, len(layer_channels)-1):
             l1 = layer_channels[i]
             l2 = layer_channels[i+1]
+            if i in skip_layers:      inputs.append( upscale_layer(l1*2,l1,True) )
+            else:                     inputs.append( upscale_layer(l1,  l1,True) )
             inputs.append( upscale_layer(l1,l2,False) )
-            inputs.append( upscale_layer(l2,l2,True) )
+        
         self.model = nn.Sequential(*inputs)
-        #self.output_layers = [] #add for decoder
+        self.skip_layers = [2*x+1 for x in skip_layers]
 
     def forward(self, photo, segmentation):
-        z = torch.cat([photo, segmentation], axis=1)
-        for layer in self.model:
-            z = layer(z)
+        z = torch.cat([photo[-1], segmentation[-1]], axis=1)
+        i_photo = -2
+        for i_layer in range(len(self.model)):
+            if i_layer in self.skip_layers: 
+                print(i_layer)
+                z = torch.cat([photo[i_photo], z], axis=1)
+                i_photo -=1
+            z = self.model[i_layer](z)
         return z
 
 class DTCNN(nn.Module):
-    def __init__(self, layer_channels=(3,64,128)):
+    def __init__(self, layer_channels=(3,64,128), skip_layers=[0,1,2]):
         super().__init__()
-        self.photo_encoder = Encoder(layer_channels = layer_channels)
-        self.segmentation_encoder = Encoder(layer_channels = layer_channels)
-        self.decoder = Shared_Decoder(layer_channels = layer_channels[::-1] )
-
+        self.photo_encoder        = Encoder(layer_channels = layer_channels,       skip_layers=skip_layers)
+        self.segmentation_encoder = Encoder(layer_channels = layer_channels,       skip_layers=skip_layers)
+        self.decoder       = Shared_Decoder(layer_channels = layer_channels[::-1], skip_layers=skip_layers)
     def forward(self, photo, segmentation):
         x = self.photo_encoder(photo)
         y = self.segmentation_encoder(segmentation)
         z = self.decoder(x,y)
         return z
-
-#use tensorboard to monitor training 
-#look it up and use it!
-
 
