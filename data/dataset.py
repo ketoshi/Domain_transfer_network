@@ -32,8 +32,9 @@ class create_dataset(Dataset):
         return sample
 
 class domain_transfer_dataset(Dataset):
-    def __init__(self, path_to_csv_file, root_dir, transform=None):
+    def __init__(self, path_to_csv_file, root_dir, transform=None, subset=-1):
         self.csv = pd.read_csv(path_to_csv_file)
+        if subset > 0: self.csv = self.csv.iloc[0:subset,:] 
         self.root_dir = root_dir
         self.transform = transform
         self.number_of_backgrounds = len(os.listdir(os.path.join(self.root_dir,'background')))
@@ -120,11 +121,12 @@ class RandomCrop(object):
         return  {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img }
 
 class ApplyMask(object): 
-    def __init__(self, segmentation_to_mask = True, dilate_sz=2):
+    def __init__(self, segmentation_to_mask = True, dilate_sz=2, do_not_apply_mask=False):
         self.dilate_sz = dilate_sz
         self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
         self.padding = (dilate_sz, dilate_sz)
         self.segmentation_to_mask = segmentation_to_mask
+        self.do_not_apply_mask = do_not_apply_mask
 
     def __call__(self, sample):
         photo_img = sample['photo']
@@ -147,7 +149,10 @@ class ApplyMask(object):
         else: 
             divide = 255 if np.amax(segmentation_img) > 1 else 1
             segmentation_img = torch.from_numpy(segmentation_img / divide).float()
-        
+        if self.do_not_apply_mask:
+            sample['segmentation'] = segmentation_img
+            return  sample
+
         if self.dilate_sz > 0: 
             im_tensor = torch.Tensor(np.expand_dims(np.expand_dims(mask_img, 0), 0))
             kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))

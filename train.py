@@ -1,42 +1,24 @@
-import os
-import torch
-import matplotlib.pyplot as plt
-import torchvision
-from torchinfo import summary
 from data.dataset import * #don't need sys .path beacuse this is root folder
 from data.utils import *
 from model.layers import *
-from torch.utils.tensorboard import SummaryWriter
-import torch.optim as optim
 import datetime
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-root_dir = '/home/isac/data/viton_hd'
-csv_file = os.path.join(root_dir,'dataset.csv')
-
-trms = torchvision.transforms.Compose([RandomCrop((512,384)), ApplyMask(), \
-      ToTensor(), LightingMult(), RotateMult(),  NormalizeMult() ]) 
-dataset = domain_transfer_dataset(csv_file, root_dir, transform=trms)
-train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(42)) #fixed seed very good!
-
-model = DTCNN(layer_channels=(3,64,128,256,512)).to(device) #just to test things then increase
-
+LAYER_CHANNELS = (3,45,128,256,512)
 BATCH_SIZE = 4
 EPOCHS = 10
-for LR in [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]:
-      save_folder = 'data/tensorboard_info/' +  datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + " LR "+str(LR)
-      writer = SummaryWriter(save_folder)
-      dataset_loader = torch.utils.data.DataLoader(train_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)#use 4-8 workers, number needs to be tuned so schedule gpu/cpu collaborate (gpu should be faster to proccess than to load a new batch)
-      optimizer = optim.Adam(model.parameters(), lr=LR)
+LR = 1e-3
+SKIP_LAYERS_arr = [[-1], [0], [1], [2], [3]]
+#changed network, but before 1e-5 <LR <1e-2  was good  1e-1 was bad
 
-      train_n_epochs(dataset_loader, model, optimizer, EPOCHS, device, writer, save_folder)
-      writer.close()
-
-print("program complete")
-
-
+for SKIP_LAYERS in SKIP_LAYERS_arr:
+      SAVE_FOLDER = 'data/tensorboard_info/' +  datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + " LR "+str(LR)
+      train_n_epochs(layer_channels=LAYER_CHANNELS, skip_layers=SKIP_LAYERS, lr=LR, batch_size = BATCH_SIZE, epochs=EPOCHS, save_folder=SAVE_FOLDER, update_dataset_per_epoch=True)
+      break
 
 #training ideas (excluding arhictecture modification)
 #try include psnr score as loss
 #2 losses, one is a downscaled image for more wide but blurry, and original for more detailed
-#
+
+
+#start tmux before running training! always
+#17:00 och frammåt nästan alla dagar fredrik ledig

@@ -1,60 +1,65 @@
+import argparse
 import os
 import torch
-import matplotlib.pyplot as plt
 import torchvision
-from torchinfo import summary
-from data.dataset import * #don't need sys .path beacuse this is root folder
+from data.dataset import * 
 from data.utils import *
 from model.layers import *
-import torch.optim as optim
-import datetime
 
+#argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('-o','--own_dataset', help='use flag if you want to use own dataset of images (in data/use_model_input)', action="store_true")
+parser.add_argument('-m','--model_path', help='use flag to specify model_path, else model/saved_models/pre_trained_model.pth will be used', default="model/saved_models/pre_trained_model.pth")
+args = parser.parse_args()
+args_dict = vars(args)
 
-#would like a arg parser here which controls some part of code
-
+#param
+if args.own_dataset:
+    root_dir = 'data/use_model_input'
+else:
+    root_dir = '/home/isac/data/viton_hd' #TODO change to real path later
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-root_dir = '/home/isac/data/viton_hd'
-csv_file = os.path.join(root_dir,'dataset.csv')
+save_folder = 'data/use_model_output'
+BATCH_SIZE = 4
 
-trms = torchvision.transforms.Compose([RandomCrop((512,384)), ApplyMask(), \
-      ToTensor(), LightingMult(), RotateMult(),  NormalizeMult() ]) 
-dataset = domain_transfer_dataset(csv_file, root_dir, transform=trms)
-
-train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(42)) #fixed seed very good! but change to 0
-
-model = DTCNN(layer_channels=(3,64,128,256,512)).to(device) #just to test things then increase
-#model_path = 'data/tensorboard_info/20230228-203927 LR 0.1/test1.pth'
-#model_path = 'data/tensorboard_info/20230228-203927 LR 0.1/test9.pth'
-#model_path = 'data/tensorboard_info/20230228-230357 LR 0.01/test9.pth'
-#model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test9.pth'
-#model_path = 'data/tensorboard_info/20230301-035227 LR 0.0001/test9.pth'
-#model_path = 'data/tensorboard_info/20230301-061619 LR 1e-05/test9.pth'
-
-#model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test1.pth'
-#model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test3.pth'
-#model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test5.pth'
-#model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test7.pth'
-model_path = 'data/tensorboard_info/20230301-012830 LR 0.001/test9.pth'
-
-model.load_state_dict(torch.load(model_path))
+#load model
+model_info_path = args_dict['model_path'][0:-3]+"json"
+with open(model_info_path) as json_file:
+    model_info = json.load(json_file)
+layer_channels = model_info["layer_channels"]
+skip_layers = model_info["skip_layers"]
+model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device) 
+model.load_state_dict( torch.load( args_dict['model_path'] ) )
 model.eval()
 
-BATCH_SIZE = 4
-save_folder = '/home/isac/Domain_transfer_network/data/use_model_output'
-dataset_loader = torch.utils.data.DataLoader(val_set, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)#use 4-8 workers, number needs to be tuned so schedule gpu/cpu collaborate (gpu should be faster to proccess than to load a new batch)
+#fix/create/load dataset
+if args.own_dataset:
+    photo_dir = 'data/use_model_input/photo'
+    segmentation_dir = 'data/use_model_input/segmentation'
 
+    csv_file_path = 'data/use_model_input/dataset.csv'
+    photo_csv_path = 'data/use_model_input/dataset_photo.csv'
+    segmentation_csv_path = 'data/use_model_input/dataset_segmentation.csv'
+    
+    write_csv(photo_csv_path,        photo_dir,        description='image', overwrite=True)
+    write_csv(segmentation_csv_path, segmentation_dir, description='segmentation', overwrite=True) 
+    combine_csv(csv_file_path, file_path1 = photo_csv_path, file_path2 = segmentation_csv_path)
+else:
+    csv_file_path = os.path.join(root_dir,'dataset.csv')
+trms = torchvision.transforms.Compose([RandomCrop((512,384)), ApplyMask(do_not_apply_mask=True), \
+      ToTensor(), NormalizeMult() ]) 
+dataset = domain_transfer_dataset(csv_file_path, root_dir, transform=trms)
+if not args.own_dataset:
+    train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(0))
+    dataset = val_set
+dataset_loader = torch.utils.data.DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+
+#generate images
 for ix, x in enumerate(tqdm(dataset_loader)):
     input_image, segmentation_image, target_image = get_loader_vals(x, device)
     generated_images = model(input_image, segmentation_image)
     save_images(save_folder, generated_images, as_batch=True)
-    break
-
+ 
 print("program complete, images saved in test_results")
 
-
-
-#training ideas (excluding arhictecture modification)
-#try include psnr score as loss
-#2 losses, one is a downscaled image for more wide but blurry, and original for more detailed
-#

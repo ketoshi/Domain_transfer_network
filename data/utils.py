@@ -1,4 +1,4 @@
-import os
+import sys,os
 import torch
 import pandas as pd
 import numpy as np
@@ -9,6 +9,13 @@ import re
 import torchvision
 from torch import tensor
 from tqdm import tqdm
+sys.path.append('data')
+sys.path.append('model')
+from dataset import domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, LightingMult, RotateMult, NormalizeMult
+from layers import *
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
+import json
 
 
 
@@ -34,8 +41,10 @@ def sort_key(file_name): # create dataset
     else:
         return -1
 
-def write_csv(csv_file_path, image_dir, description='image'): #create dataset
-    if os.path.exists(csv_file_path): return 0
+def write_csv(csv_file_path, image_dir, description='image', overwrite=False): #create dataset
+    #creade csv file from folder of images
+    if os.path.exists(csv_file_path): 
+        if not overwrite: return 0
 
     with open(csv_file_path, 'w') as file:
         writer = csv.writer(file)
@@ -98,9 +107,29 @@ def get_loss(generated_image, target_image):
 def get_loader_vals(values, device):
     return values['photo'].to(device), values['segmentation'].to(device), values['target'].to(device)
 
-def train_n_epochs(dataset_loader, model, optimizer, epochs, device, writer, save_folder):
+def train_n_epochs(layer_channels, skip_layers, lr, batch_size, epochs, save_folder, update_dataset_per_epoch = True):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device)
+
+    root_dir = '/home/isac/data/viton_hd'
+    csv_file = os.path.join(root_dir,'dataset.csv')
+    trms = torchvision.transforms.Compose([RandomCrop((512,384)), ApplyMask(), \
+      ToTensor(), LightingMult(), RotateMult(),  NormalizeMult() ]) 
+   
+    dataset = domain_transfer_dataset(csv_file, root_dir, transform=trms)
+    train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(0)) 
+    dataset_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4)
     ld = len(dataset_loader)
-    for epoch in range(epochs):        
+
+
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    writer = SummaryWriter(save_folder)
+    for epoch in range(epochs):   
+        if update_dataset_per_epoch and epoch > 0:     
+            dataset = domain_transfer_dataset(csv_file, root_dir, transform=trms)
+            train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(0)) 
+            dataset_loader = torch.utils.data.DataLoader(train_set, batch_size=batch_size, shuffle=True, num_workers=4)
+
         for ix, x in enumerate(tqdm(dataset_loader)):
             i_scalar = epoch*ld + ix
             optimizer.zero_grad()
@@ -113,11 +142,15 @@ def train_n_epochs(dataset_loader, model, optimizer, epochs, device, writer, sav
             loss.backward()
             optimizer.step()
 
-        tensor = generated_image.clone()   #Change if we normalize output! to (img+1)/2
-        grid = torchvision.utils.make_grid(tensor)
+        gen_img = generated_image.clone()   #Change if we normalize output! to (img+1)/2
+        grid = torchvision.utils.make_grid(gen_img)
         writer.add_image('images', grid, global_step=epoch)
-
-        torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
-
-#start tmux before running training! always
-#17:00 och frammåt flesta dagar,  17:00 fredag.  
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
+        
+        if epoch == 0:
+            info = {'lr':lr, 'batch_size':batch_size, 'epochs':epochs, 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':layer_channels, 'skip_layers':skip_layers}
+            info_file = os.path.join(save_folder,'model_info.json')
+            with open(info_file, 'w') as outfile:
+                json.dump(info, outfile)
+    writer.close()

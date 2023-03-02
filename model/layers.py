@@ -14,7 +14,7 @@ from torchinfo import summary
 sys.path.append('data')
 from dataset import *
 
-#------------functions----------------------
+#------------Functions----------------------
 def convolution_downscale_factor_2(in_channels, out_channels, kernel_size=3):
     kernel_size = (kernel_size//2)*2+1
     padding =  kernel_size//2
@@ -66,7 +66,9 @@ def upscale_layer(in_channels, out_channels, should_upscale = True):
     return layer
 
 
-#---------------classes------------------
+#---------------MODEL ------------------
+
+
 class Encoder(nn.Module):
     def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
         super().__init__()
@@ -88,8 +90,6 @@ class Encoder(nn.Module):
         self.outputs.append(x)
         return self.outputs
 
-#u-net has conv kernel=1x1   at last step maybe
-
 class Shared_Decoder(nn.Module):
     def __init__(self, layer_channels=(512,256,128,64,3), skip_layers=[-1]):
         super().__init__()
@@ -98,7 +98,7 @@ class Shared_Decoder(nn.Module):
         skip_layers = [(len(layer_channels)-2) - x for x in skip_layers]
         
         l1 = layer_channels[0]
-        inputs.append( upscale_layer(2*l1,  l1,False) )
+        inputs.append( upscale_layer(2*l1,  l1,False) ) #concatenate photo & segmentation
         for i in range(0, len(layer_channels)-1):
             l1 = layer_channels[i]
             l2 = layer_channels[i+1]
@@ -114,14 +114,13 @@ class Shared_Decoder(nn.Module):
         i_photo = -2
         for i_layer in range(len(self.model)):
             if i_layer in self.skip_layers: 
-                print(i_layer)
                 z = torch.cat([photo[i_photo], z], axis=1)
                 i_photo -=1
             z = self.model[i_layer](z)
         return z
 
 class DTCNN(nn.Module):
-    def __init__(self, layer_channels=(3,64,128), skip_layers=[0,1,2]):
+    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
         super().__init__()
         self.photo_encoder        = Encoder(layer_channels = layer_channels,       skip_layers=skip_layers)
         self.segmentation_encoder = Encoder(layer_channels = layer_channels,       skip_layers=skip_layers)
