@@ -109,7 +109,8 @@ def get_loader_vals(values, device):
 
 def train_n_epochs(layer_channels, skip_layers, lr, batch_size, epochs, save_folder, update_dataset_per_epoch = True):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device)
+    #model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device)
+    model = test_model3().to(device)
 
     root_dir = '/home/isac/data/viton_hd'
     csv_file = os.path.join(root_dir,'dataset.csv')
@@ -145,7 +146,7 @@ def train_n_epochs(layer_channels, skip_layers, lr, batch_size, epochs, save_fol
         gen_img = generated_image.clone()   #Change if we normalize output! to (img+1)/2
         grid = torchvision.utils.make_grid(gen_img)
         writer.add_image('images', grid, global_step=epoch)
-        if epoch % 5 == 0:
+        if (epoch+1) % 5 == 0:
             torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
         
         if epoch == 0:

@@ -87,7 +87,7 @@ class Encoder(nn.Module):
             x = self.model[i_layer](x)
             if i_layer in self.skip_layers: 
                 self.outputs.append(x)
-        self.outputs.append(x)
+        self.outputs.append(x)#only output given if skip = [-1]
         return self.outputs
 
 class Shared_Decoder(nn.Module):
@@ -131,3 +131,79 @@ class DTCNN(nn.Module):
         z = self.decoder(x,y)
         return z
 
+
+
+#simpler models for debugging ---
+
+class test_model(nn.Module):   #NO memory leak
+    def __init__(self,ll=(3,5)) :
+        super().__init__()
+        inputs = []
+        inputs.append( downscale_layer(ll[0],ll[0],True) )
+        inputs.append( downscale_layer(ll[0],ll[0],True) )
+        inputs.append( downscale_layer(ll[0],ll[0],True) )
+        inputs.append( downscale_layer(ll[0],ll[0],True) )
+        inputs.append( upscale_layer(ll[0],ll[0],True) )
+        inputs.append( upscale_layer(ll[0],ll[0],True) )
+        inputs.append( upscale_layer(ll[0],ll[0],True) )
+        inputs.append( upscale_layer(ll[0],ll[0],True) )
+        self.model = nn.Sequential(*inputs)
+
+
+    def forward(self, photo, segmentation):
+        for layer in self.model:
+            photo = layer(photo)
+        return photo
+
+class test_model2(nn.Module): #super memory leak!!! 
+    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
+        super().__init__()
+        self.outputs = []
+        inputs = []
+        for i in range(0, len(layer_channels)-1):
+            l1 = layer_channels[i]
+            l2 = layer_channels[i+1]
+            inputs.append( downscale_layer(l1,l2,False) )
+            inputs.append( downscale_layer(l2,l2,True) )
+        self.model = nn.Sequential(*inputs)
+        self.skip_layers = [2*x+1 for x in skip_layers]
+
+        self.model2 = nn.Sequential(*[downscale_layer(3,3,True), upscale_layer(3,3,True)])
+
+    def forward(self, photo,segmentation):
+        x = photo
+        for i_layer in range(len(self.model)):
+            x = self.model[i_layer](x)
+            if i_layer in self.skip_layers: 
+                self.outputs.append(x)
+        self.outputs.append(x)  
+
+        for layer in self.model2:
+            photo = layer(photo)
+        return photo
+
+
+    
+class test_model3(nn.Module): #no memory leak
+    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
+        super().__init__()
+        self.outputs = []
+        inputs = []
+        for i in range(0, len(layer_channels)-1):
+            l1 = layer_channels[i]
+            l2 = layer_channels[i+1]
+            inputs.append( downscale_layer(l1,l2,False) )
+            inputs.append( downscale_layer(l2,l2,True) )
+        self.model = nn.Sequential(*inputs)
+        self.skip_layers = [2*x+1 for x in skip_layers]
+
+        self.model2 = nn.Sequential(*[downscale_layer(3,3,True), upscale_layer(3,3,True)])
+
+    def forward(self, photo,segmentation):
+        x = photo
+        for i_layer in range(len(self.model)):
+            x = self.model[i_layer](x)
+
+        for layer in self.model2:
+            photo = layer(photo)
+        return photo
