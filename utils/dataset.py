@@ -3,12 +3,8 @@ import torch
 import pandas as pd
 from skimage import io, transform
 import numpy as np
-import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, utils
+from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
-import csv
-import re
 
 class create_dataset(Dataset):
     def __init__(self, path_to_csv_file, image_dir, transform=None):
@@ -32,11 +28,17 @@ class create_dataset(Dataset):
         return sample
 
 class domain_transfer_dataset(Dataset):
-    def __init__(self, path_to_csv_file, root_dir, transform=None):
-        self.csv = pd.read_csv(path_to_csv_file)
+    def __init__(self, root_dir, transform=None, subset=-1):
+        csv_path = os.path.join(root_dir,'dataset.csv') 
+        self.has_segmentation = os.path.isfile(csv_path)
+        if not self.has_segmentation: csv_path = os.path.join(root_dir,'photo.csv') 
+        
+        self.csv = pd.read_csv(csv_path)
+        if subset > 0: self.csv = self.csv.iloc[0:subset,:] 
         self.root_dir = root_dir
         self.transform = transform
-        self.number_of_backgrounds = len(os.listdir(os.path.join(self.root_dir,'background')))
+        self.background_dir = os.path.join( os.path.dirname(root_dir), "background")
+        self.number_of_backgrounds = len( os.listdir(self.background_dir) )
 
     def __len__(self):
         return len(self.csv)
@@ -44,17 +46,17 @@ class domain_transfer_dataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx): 
             idx = idx.tolist() 
-        photo_name = os.path.join(self.root_dir, 'photo',
-                                self.csv.iloc[idx, 0])
-        segmentation_name = os.path.join(self.root_dir,'segmentation',  
-                                self.csv.iloc[idx, 1])
-        bg_index = np.random.randint(0, self.number_of_backgrounds)
-        background_name = os.path.join(self.root_dir, 'background', str(bg_index)+'.jpg')
+        photo_name        = os.path.join(self.root_dir, 'photo',        self.csv.iloc[idx, 0])
+        if self.has_segmentation:
+            segmentation_name = os.path.join(self.root_dir, 'segmentation', self.csv.iloc[idx, 1])
+        else: segmentation_name = photo_name
+        bg_index          = np.random.randint(0, self.number_of_backgrounds)
+        background_name   = os.path.join(self.background_dir, str(bg_index)+'.jpg')
 
         photo_img  = io.imread(photo_name)
         target_img = io.imread(photo_name)
         background_img = io.imread(background_name) 
-        segmentation_img = io.imread(segmentation_name)
+        segmentation_img = io.imread(segmentation_name)[:,:,0:3]
         
         sample = {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img}
 
@@ -79,7 +81,7 @@ class Rescale(object):
             new_h, new_w = self.output_size
             new_h, new_w = int(new_h), int(new_w)
         
-        photo_img = transform.resize(photo_img, (new_h, new_w))
+        photo_img = transform.resize(photo_img, (new_h, new_w),anti_aliasing=True, order=2)# check resize mode, anti-aliasing is used
         if len(sample) < 2: return {'photo': photo_img}
         
         segmentation_img = transform.resize(sample['segmentation'], (new_h, new_w))
@@ -120,13 +122,15 @@ class RandomCrop(object):
         return  {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img }
 
 class ApplyMask(object): 
-    def __init__(self, segmentation_to_mask = True, dilate_sz=2):
+    def __init__(self, get_color_segmentation = False, dilate_sz=2, apply_mask=True):
         self.dilate_sz = dilate_sz
         self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
         self.padding = (dilate_sz, dilate_sz)
-        self.segmentation_to_mask = segmentation_to_mask
+        self.get_color_segmentation = get_color_segmentation
+        self.apply_mask = apply_mask
 
     def __call__(self, sample):
+        if self.dilate_sz < 1: return sample
         photo_img = sample['photo']
         segmentation_img = sample['segmentation']
         background_img = sample['background']
@@ -142,12 +146,15 @@ class ApplyMask(object):
         mask_img[mask_img > 1e-3] = 1
         mask_img[mask_img < 1] = 0
         
-        if self.segmentation_to_mask: #if fals --> get segmentation_image with colors
+        if not self.get_color_segmentation:
             segmentation_img = torch.from_numpy(np.stack((mask_img,mask_img,mask_img), axis=channel_axis)).float()
         else: 
             divide = 255 if np.amax(segmentation_img) > 1 else 1
             segmentation_img = torch.from_numpy(segmentation_img / divide).float()
-        
+        if not self.apply_mask:
+            sample['segmentation'] = segmentation_img
+            return  sample
+
         if self.dilate_sz > 0: 
             im_tensor = torch.Tensor(np.expand_dims(np.expand_dims(mask_img, 0), 0))
             kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))
@@ -162,8 +169,41 @@ class ApplyMask(object):
         sample['photo'] = photo_img
         return  sample
 
+
+class ErodeSegmentation(object): 
+    def __init__(self, dilate_sz=2):
+        self.dilate_sz = dilate_sz
+        self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
+        self.padding = (dilate_sz, dilate_sz)
+
+    def __call__(self, sample):
+        if self.dilate_sz <1: return sample
+        
+        segmentation_img = sample['segmentation']
+        are_images_tensors = torch.is_tensor(segmentation_img)
+        channel_axis = 0 if are_images_tensors else 2
+        if are_images_tensors: 
+            segmentation_img = np.array(segmentation_img[0:3,:,:]) 
+        else: 
+            segmentation_img = np.array(segmentation_img[:,:,0:3])
+        
+        mask_img = np.max(segmentation_img, channel_axis)
+        mask_img[mask_img > 1e-3] = 1
+        mask_img[mask_img < 1] = 0
+        
+        im_tensor = torch.Tensor(np.expand_dims(np.expand_dims(mask_img, 0), 0))
+        kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))
+        mask_img = 1 - torch.clamp(torch.nn.functional.conv2d(1- im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
+        mask_img = np.stack((mask_img,mask_img,mask_img), axis=channel_axis)
+        mask_img  = torch.from_numpy(mask_img)
+
+        sample['segmentation'] = mask_img
+        return  sample
+
+
 class ToTensor(object):
     def __call__(self, sample):
+        #(ndarray)w,h,c -->(tensor) c,w,h
         photo_img        = sample['photo'].transpose((2, 0, 1))    
         target_img       = sample['target'].transpose((2, 0, 1))    
         segmentation_img = np.array(sample['segmentation']).transpose((2, 0, 1))    
@@ -179,7 +219,6 @@ class ToTensor(object):
         if torch.max(target_img)>1: target_img/=255  
         if torch.max(background_img)>1: background_img/=255  
 
-        #w,h,c --> c,w,h
         return {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img }
 
 
@@ -212,71 +251,3 @@ class NormalizeMult(object): #I don't normalize the output image as well right?,
         sample['segmentation'] = segmentation_img
         return sample
 
-
-#-----------------Create dataset functions-------------------
-
-def save_dataset_images(folder, dataset): # create dataset
-    data_len = len(dataset)
-    data_1_percent = data_len//100 
-    for idx in range(data_len):
-        if idx % data1percent == 0: print(f'{idx/data_len:2.f}')
-        sample = dataset[idx]
-        img = sample['photo']
-        file_name = os.path.join(folder, str(idx)+'.jpg')
-        plt.imsave(file_name, img)
-
-    print('saved all images in' + folder)
-
-def sort_key(file_name): # create dataset
-    #make filename into integer, which is sorted
-    file_number_str = re.match('[0-9]+', file_name)
-    if file_number_str is not None:
-        return int(file_number_str.group())
-    else:
-        return -1
-
-def write_csv(csv_file_path, image_dir, description='image'): #create dataset
-    if os.path.exists(csv_file_path): return 0
-
-    with open(csv_file_path, 'w') as file:
-        writer = csv.writer(file)
-        writer.writerow([description])
-                
-        entries = os.listdir(image_dir)
-        entries.sort(key=sort_key)
-
-        for entry in entries:
-            if entry[-1]!='g': continue
-            writer.writerow([entry])
-
-def combine_csv(save_path, file_path1, file_path2): #create dataset
-    f1 = pd.read_csv(file_path1)
-    f2 = pd.read_csv(file_path2)
-
-    with open(save_path, 'w') as file:
-        writer = csv.writer(file)
-        writer.writerow([f1.columns[0],f2.columns[0]])
-
-        for idx in range(len(f1)):
-            f1_file = f1.iloc[idx, 0]
-            f2_file = f2.iloc[idx, 0]
-            writer.writerow([f1_file, f2_file])
-            
-
-#----------training & functions---------------
-
-def split_data(dataset):
-    i = (0.95*len(dataset))//1
-    training_set = dataset[0:i]
-    test_set = dataset[i:]
-    return training_set, test_set
-
-def tensor_to_saveable_img(tensor):
-    y = torch.transpose(tensor, 0, 2)
-    y = torch.transpose(y, 0, 1)
-    y = np.array(y)
-    if np.amin(y) < 0 : y = (y+1)/2 
-    return y
-
-def save_batch_images(savefolder, sample_batched, show_photos_or_target='photo'): #TODO:
-   2 #saves all images into a save_folder

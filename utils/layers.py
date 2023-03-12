@@ -1,17 +1,7 @@
-import os
 import sys
 import torch
-import pandas as pd
-from skimage import io, transform
-import numpy as np
-import matplotlib.pyplot as plt
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, utils
 from torch import nn
-import csv
 from torchinfo import summary
-
-sys.path.append('data')
 from dataset import *
 
 #------------Functions----------------------
@@ -72,7 +62,6 @@ def upscale_layer(in_channels, out_channels, should_upscale = True):
 class Encoder(nn.Module):
     def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
         super().__init__()
-        self.outputs = []
         inputs = []
         for i in range(0, len(layer_channels)-1):
             l1 = layer_channels[i]
@@ -83,12 +72,13 @@ class Encoder(nn.Module):
         self.skip_layers = [2*x+1 for x in skip_layers]
 
     def forward(self, x):
+        outputs = []
         for i_layer in range(len(self.model)):
             x = self.model[i_layer](x)
             if i_layer in self.skip_layers: 
-                self.outputs.append(x)
-        self.outputs.append(x)#only output given if skip = [-1]
-        return self.outputs
+                outputs.append(x)
+        outputs.append(x)#only output is given if skip = [-1]
+        return outputs
 
 class Shared_Decoder(nn.Module):
     def __init__(self, layer_channels=(512,256,128,64,3), skip_layers=[-1]):
@@ -158,7 +148,6 @@ class test_model(nn.Module):   #NO memory leak
 class test_model2(nn.Module): #super memory leak!!! 
     def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1]):
         super().__init__()
-        self.outputs = []
         inputs = []
         for i in range(0, len(layer_channels)-1):
             l1 = layer_channels[i]
@@ -172,14 +161,12 @@ class test_model2(nn.Module): #super memory leak!!!
 
     def forward(self, photo,segmentation):
         x = photo
+        self.outputs = []
         for i_layer in range(len(self.model)):
             x = self.model[i_layer](x)
             if i_layer in self.skip_layers: 
                 self.outputs.append(x)
         self.outputs.append(x)  
-
-        for layer in self.model2:
-            photo = layer(photo)
         return photo
 
 
