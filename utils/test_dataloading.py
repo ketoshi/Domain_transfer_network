@@ -3,28 +3,38 @@ import os
 import matplotlib.pyplot as plt
 import torch
 import torchvision
-from utils import tensor_to_saveable_img
-from dataset import domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, ErodeSegmentation, LightingMult, RotateMult, NormalizeMult, Rescale
+from utils import tensor_to_saveable_img, get_dataloader
+from dataset import domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, ErodeSegmentation, LightingMult, RotateMult, NormalizeMult, Rescale, Rescale_bg_down_and_up
+import warnings
+warnings.filterwarnings('ignore')
 
 root_dir = '/home/isac/data/viton_hd' 
 
-trms = torchvision.transforms.Compose([Rescale((512,284)) ,RandomCrop((512,284)), ToTensor(), \
-    ApplyMask(dilate_sz=10,segmentation_to_mask=True), ErodeSegmentation(0),LightingMult(), RotateMult() , NormalizeMult()]) 
+dataset_loader = get_dataloader(root_dir=root_dir,
+                            usage='use_model_use_mask',
+                            bg_mode="validation",
+                            validation_length=3,
+                            BATCH_SIZE=3,
+                            dilation=0,
+                            erosion=0,
+                            get_color_segmentation=False
+)
 
-dataset = domain_transfer_dataset(root_dir, transform=trms)
-train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-2,2], generator=torch.Generator().manual_seed(0))
-dataset_loader = torch.utils.data.DataLoader(val_set, batch_size=1, shuffle=True, num_workers=4) 
+trms = torchvision.transforms.Compose([RandomCrop((512,384)), Rescale_bg_down_and_up(), ApplyMask(0), ErodeSegmentation(0), ToTensor(), NormalizeMult() ]) 
+dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode="255")
+train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(0))
+dataset_loader = torch.utils.data.DataLoader(val_set, batch_size=3, shuffle=True, num_workers=4)
 
-for ix, x in enumerate(dataset_loader):
-    photo = x['photo']
-    segmentation = x['segmentation']
+
+for x in dataset_loader:
+    photo = (x['photo']+1)/2
+    segmentation = (x['segmentation']+1)/2
     target = x['target'] 
-    photo = torchvision.utils.make_grid(photo)
-    segmentation = torchvision.utils.make_grid(segmentation)
-    target = torchvision.utils.make_grid(target)
-
-plt.imsave('data/test_results/test_image0.jpg', tensor_to_saveable_img(photo))
-plt.imsave('data/test_results/test_image1.jpg', tensor_to_saveable_img(segmentation))
-plt.imsave('data/test_results/test_image2.jpg', tensor_to_saveable_img(target))
+    a1 = torchvision.utils.make_grid(photo)
+    a2 = torchvision.utils.make_grid(target)
+    a3 = torchvision.utils.make_grid(segmentation)
+    break
+grid_tot = torch.concat((a1,a2,a3),dim=1)
+plt.imsave('data/test_results/test_image0.jpg', tensor_to_saveable_img(grid_tot))
 
 print('complete, check out images.')
