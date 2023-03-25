@@ -1,0 +1,12 @@
+we can see that  from bg15k 1-5:
+3 64 128 256 better then 3 64 yet less memory taken. (and lr clearly reflects it)
+we see that having no skip connections causes the final image to come out very blurry (and loss reflects it)
+
+we see that using function_twice did not yield so good results
+we see that only using lpips not so good, but ok with psnr/ssim (combine mse with score work for all three)
+"using 255 or 15k bg background images didn't change much but not sampling randomly did help alot"
+
+might want to check how segmentation becomes after swapping 80% of bg
+
+
+eroision 10 10x slower

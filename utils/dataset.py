@@ -28,7 +28,7 @@ class create_dataset(Dataset):
         return sample
 
 class domain_transfer_dataset(Dataset):
-    def __init__(self, root_dir, transform=None, subset=-1, background_mode="train"):
+    def __init__(self, root_dir, transform=None, subset=-1, background_mode="train", specific_background_path="no"):
         csv_path = os.path.join(root_dir,'dataset.csv') 
         self.has_segmentation = os.path.isfile(csv_path)
         if not self.has_segmentation: csv_path = os.path.join(root_dir,'photo.csv') 
@@ -44,6 +44,7 @@ class domain_transfer_dataset(Dataset):
         else:   
             self.background_dir = os.path.join( os.path.dirname(root_dir), "background_evaluation")
         self.number_of_backgrounds = len( os.listdir(self.background_dir) )
+        self.specific_background_path = specific_background_path
 
     def __len__(self):
         return len(self.csv)
@@ -57,6 +58,7 @@ class domain_transfer_dataset(Dataset):
         else: segmentation_name = photo_name
         bg_index          = (idx + np.random.randint(0, 200) ) % self.number_of_backgrounds #before it was just = rand(0,len(bg))
         background_name   = os.path.join(self.background_dir, str(bg_index)+'.jpg')
+        if self.specific_background_path != "no": background_name = self.specific_background_path
 
         photo_img  = io.imread(photo_name)
         target_img = io.imread(photo_name)
@@ -71,38 +73,27 @@ class domain_transfer_dataset(Dataset):
 
 class Rescale(object):
     def __init__(self, output_size):
-        assert isinstance(output_size, (int, tuple))
         self.output_size = output_size
 
     def __call__(self, sample):
-        photo_img = sample['photo']
-        h, w = photo_img.shape[:2]
-        if isinstance(self.output_size, int): 
-            if h > w:
-                new_h, new_w = self.output_size * h / w, self.output_size
-            else:
-                new_h, new_w = self.output_size, self.output_size * w / h
-        else:
-            new_h, new_w = self.output_size
-            new_h, new_w = int(new_h), int(new_w)
+        sz = self.output_size
+        if sz != sample['photo'].shape[:2]: 
+            sample['photo'] = transform.resize(sample['photo'], sz, anti_aliasing=True, order=2)
         
-        photo_img = transform.resize(photo_img, (new_h, new_w),anti_aliasing=True, order=2)# check resize mode, anti-aliasing is used
-        if len(sample) < 2: return {'photo': photo_img}
-        
-        segmentation_img = transform.resize(sample['segmentation'], (new_h, new_w))
-        target_img = transform.resize(sample['target'], (new_h, new_w))
-        background_img = transform.resize(sample['background'], (new_h, new_w))
-        return  {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img }
+        if len(sample) < 2: return sample
+
+        if sz != sample['segmentation'].shape[:2]: 
+            sample['segmentation'] = transform.resize(sample['segmentation'], sz, anti_aliasing=True, order=2)
+        if sz != sample['target'].shape[:2]: 
+            sample['target'] = transform.resize(sample['target'], sz, anti_aliasing=True, order=2)
+        if sz != sample['background'].shape[:2]: 
+            sample['background'] = transform.resize(sample['background'], sz, anti_aliasing=True, order=2)
+        return  sample
 
 class RandomCrop(object):
 
     def __init__(self, output_size):
-        assert isinstance(output_size, (int, tuple))
-        if isinstance(output_size, int):
-            self.output_size = (output_size, output_size) 
-        else:
-            assert len(output_size) == 2
-            self.output_size = output_size
+        self.output_size = output_size
 
     def __call__(self, sample):
         photo_img = sample['photo']
@@ -119,15 +110,16 @@ class RandomCrop(object):
             new_w = w
         else: left = np.random.randint(0, w - new_w)
         
-        photo_img           = photo_img[                top:  top + new_h, left: left + new_w]
-        if len(sample) < 2: return {'photo': photo_img}
-        segmentation_img    = sample['segmentation'][   top:  top + new_h, left: left + new_w]
-        target_img          = sample['target'][         top:  top + new_h, left: left + new_w]
-        background_img      = sample['background'][     top:  top + new_h, left: left + new_w]
-        return  {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img }
+        sample['photo']           = photo_img[                top:  top + new_h, left: left + new_w]
+        if len(sample) < 2: return sample
+        sample['segmentation']    = sample['segmentation'][   top:  top + new_h, left: left + new_w]
+        sample['target']          = sample['target'][         top:  top + new_h, left: left + new_w]
+        sample['background']      = sample['background'][     top:  top + new_h, left: left + new_w]
+        return sample
 
 class ApplyMask(object): 
     def __init__(self, dilate_sz=2, get_color_segmentation = False):
+        if dilate_sz == 'rnd': dilate_sz = 100 
         self.dilate_sz = dilate_sz
         self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
         self.padding = (dilate_sz, dilate_sz)
@@ -138,6 +130,11 @@ class ApplyMask(object):
         photo_img = sample['photo']
         segmentation_img = sample['segmentation']
         background_img = sample['background']
+
+        if self.dilate_sz == 100:
+            self.dilate_sz = np.random.randint(0,10)
+            self.kernel =  np.ones((2*self.dilate_sz+1, 2*self.dilate_sz+1))
+            self.padding = (self.dilate_sz, self.dilate_sz)
         
         are_images_tensors = torch.is_tensor(segmentation_img)
         channel_axis = 0 if are_images_tensors else 2
@@ -172,14 +169,25 @@ class ApplyMask(object):
 class ErodeSegmentation(object): 
     def __init__(self, dilate_sz=2, get_color_segmentation=False):
         self.is_erode = True if dilate_sz >= 0 else False
-        self.dilate_sz = dilate_sz if self.is_erode else -dilate_sz
+        if dilate_sz == 'rnd': 
+            dilate_sz = 100
+        elif dilate_sz < 0: 
+            dilate_sz = -dilate_sz
+        self.dilate_sz = dilate_sz
         self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
         self.padding = (dilate_sz, dilate_sz)
         self.get_color = get_color_segmentation
+        
 
     def __call__(self, sample):
         if self.get_color: return sample
-         
+        if self.dilate_sz == 100:
+            self.dilate_sz = np.random.randint(-10,11)
+            self.is_erode = True if self.dilate_sz >= 0 else False 
+            self.dilate_sz = self.dilate_sz if self.is_erode else -self.dilate_sz
+            self.kernel =  np.ones((2*self.dilate_sz+1, 2*self.dilate_sz+1))
+            self.padding = (self.dilate_sz, self.dilate_sz)
+            
         segmentation_img = sample['segmentation']
         segmentation_img = np.array(segmentation_img) 
         ch_ax = 2
@@ -248,7 +256,7 @@ class RotateMult(object):
         segmentation_img = sample['segmentation']
         target_img = sample['target']
  
-        photo_img = TF.rotate(photo_img, angle)
+        photo_img = TF.rotate(photo_img, angle, interpolation=TF.InterpolationMode.BILINEAR)
         segmentation_img = TF.rotate(segmentation_img, angle)
         target_img = TF.rotate(sample['target'], angle)
         return {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': sample['background']}

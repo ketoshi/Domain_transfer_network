@@ -39,7 +39,7 @@ def table_format_print(is_str, format_name, *params):
 
 
 tot_list = scan_scores(dir = '/home/isac/data/tensorboard_info')
-dist     = 10
+dist     = 15
 decimals = 4
 format_str = "{:<{}} {:<{}} {:<{}} {:<{}} {:<{}} {:<{}} {:<{}} ".format
 format_float = "{:<{}.{}f} {:<{}.{}f} {:<{}.{}f} {:<{}.{}f} {:<{}.{}f} {:<{}.{}f} {:<{}.{}f} ".format

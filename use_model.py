@@ -13,14 +13,14 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 root_dir   = '/home/isac/data/viton_hd'
 root_f550k_dir = '/home/isac/data/f550k'
 model_path = "/home/isac/data/tensorboard_info/20230323-002150{'dilation': 0, 'erosion': 0, 'color': False, 'skip_layers': [0, 1, 2, 3, 4, 5], 'layer_channels': (3, 64, 128, 256, 512, 1024, 2048), 'function': 'train_n_epochs'}/test19.pth"
-save_folder = 'data/use_model_output' # for generating images
+save_folder = '/home/isac/data/use_model_output' # for generating images
 
-PROGRAM_TASK = "TRAIN" #GENERATE, EVALUATE, TRAIN 
+PROGRAM_TASK = "GENERATE" #GENERATE, EVALUATE, TRAIN 
 
 if PROGRAM_TASK == "GENERATE": #try with both backgrounds
     dataloader = get_dataloader(root_dir=root_f550k_dir,
                                 usage='use_model_use_mask',
-                                use_set="bg255",
+                                bg_mode="validation",
                                 validation_length=500,
                                 BATCH_SIZE=3,
                                 dilation=0,
@@ -33,8 +33,9 @@ if PROGRAM_TASK == "GENERATE": #try with both backgrounds
     sc.sort()
     for x in sc:
         model_path = os.path.join(dir,x,"test4.pth")
+    
     model_path = "/home/isac/data/tensorboard_info/20230323-002150{'dilation': 0, 'erosion': 0, 'color': False, 'skip_layers': [0, 1, 2, 3, 4, 5], 'layer_channels': (3, 64, 128, 256, 512, 1024, 2048), 'function': 'train_n_epochs'}/test19.pth"
-    generate_images(dataloader, model_path, save_folder, max_images=1)
+    generate_images(dataloader, model_path, save_folder, max_images=1, photo_mode=0)
 
 if PROGRAM_TASK == "EVALUATE":
     
@@ -47,12 +48,12 @@ if PROGRAM_TASK == "EVALUATE":
         lpips_model = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device)
     score_and_device = {'fid':fid, 'ssim':ssim_model, 'psnr':psnr_model,'lpips':lpips_model, 'device':device}
 
-    str1s = [
-            "/home/isac/data/tensorboard_info/20230317-031158function:train_n_epochs_bg15k/test4.pth",
-            "/home/isac/data/tensorboard_info/20230317-044228function:train_n_epochs_twice_bg15k/test4.pth",
-        ]
+    dir = "/home/isac/data/tensorboard_info"
+    model_paths = os.listdir(dir)
+    model_paths.sort()
+    model_paths = [os.path.join(dir,x,"test4.pth") for x in model_paths]
 
-    for model_path in str1s:    
+    for model_path in model_paths:    
 
         model_info_path = os.path.join( os.path.dirname(model_path), "model_info.json")
         with open(model_info_path) as json_file:
@@ -115,12 +116,13 @@ if PROGRAM_TASK == "TRAIN": #remember to try e.g. erode function!
     train_info = {
     'batch_size': 3, 'epochs':5, 'lr': 1e-3
     }
+
     # add bg255:0 in extra info if use bg255
-    extra_info = {'dilation':0, 'erosion':0,'color':False }
-    extra_infos = [{'dilation':0, 'erosion':0,'color':False, 'bg255':0}]#{'dilation':0, 'erosion':10,'color':False }]
-    params = {'lc':[(3,64,128,256,512,1024,2048)],#(3,32,64,128,256)], 
-     'sk': [[0,1,2,3,4,5]],#,[0,1,2,3,4]],
-     'fc': [train_n_epochs]}#,train_n_epochs]}
+    extra_infos = [{'dilation':'rnd', 'erosion':'rnd','color':False }]
+    extra_info = extra_infos[0]
+    params = {'lc':[(3,64,128,256,512,1024)], 
+     'sk': [[0,1,2,3,4]],
+     'fc': [train_n_epochs]}
 
     ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
     psnr = torchmetrics.PeakSignalNoiseRatio().to(device) if "psnr" in extra_info else 1

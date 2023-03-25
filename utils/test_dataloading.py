@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 root_dir = '/home/isac/data/viton_hd' 
 
 dataset_loader = get_dataloader(root_dir=root_dir,
-                            usage='use_model_use_mask',
+                            usage='train',
                             bg_mode="validation",
                             validation_length=3,
                             BATCH_SIZE=3,
@@ -19,12 +19,6 @@ dataset_loader = get_dataloader(root_dir=root_dir,
                             erosion=0,
                             get_color_segmentation=False
 )
-
-trms = torchvision.transforms.Compose([RandomCrop((512,384)), Rescale_bg_down_and_up(), ApplyMask(0), ErodeSegmentation(0), ToTensor(), NormalizeMult() ]) 
-dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode="255")
-train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-500,500], generator=torch.Generator().manual_seed(0))
-dataset_loader = torch.utils.data.DataLoader(val_set, batch_size=3, shuffle=True, num_workers=4)
-
 
 for x in dataset_loader:
     photo = (x['photo']+1)/2
