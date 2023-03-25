@@ -19,7 +19,7 @@ dataloader = get_dataloader(root_dir=root_dir,
                             erosion=0,
                             get_color_segmentation=False
 )
-generate_images(dataloader, model_path, save_folder, max_images=1, photo_mode=1)#photo_mode 0,1,2
+generate_images(dataloader, model_path, save_folder, max_images=-1, photo_mode=1)#photo_mode 0,1,2, max images = -1 for generate all photos
 
 
 
