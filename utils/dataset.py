@@ -5,27 +5,21 @@ from skimage import io, transform
 import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms.functional as TF
+import albumentations as A
+import cv2
+from torchvision import transforms
+import matplotlib.pyplot as plt
+from albumentations.pytorch import ToTensorV2
+from skimage.transform import resize
 
-class create_dataset(Dataset):
-    def __init__(self, path_to_csv_file, image_dir, transform=None):
-        self.csv = pd.read_csv(path_to_csv_file)
-        self.image_dir = image_dir
-        self.transform = transform
 
-    def __len__(self):
-        return len(self.csv)
-
-    def __getitem__(self, idx):
-        if torch.is_tensor(idx): 
-            idx = idx.tolist() 
-        photo_name = os.path.join(self.image_dir,
-                                self.csv.iloc[idx, 0])
-        photo_img = io.imread(photo_name)
-        sample = {'photo': photo_img}
-
-        if self.transform:
-            sample = self.transform(sample)
-        return sample
+def clip(imgs,num=255):
+    for x in imgs: 
+        img = imgs[x]
+        img[img<0]=0
+        img[img>num]=num
+        imgs[x]=img
+    return imgs
 
 class domain_transfer_dataset(Dataset):
     def __init__(self, root_dir, transform=None, subset=-1, background_mode="train", specific_background_path="no"):
@@ -52,15 +46,16 @@ class domain_transfer_dataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx): 
             idx = idx.tolist() 
+        
         photo_name        = os.path.join(self.root_dir, 'photo',        self.csv.iloc[idx, 0])
         if self.has_segmentation:
             segmentation_name = os.path.join(self.root_dir, 'segmentation', self.csv.iloc[idx, 1])
         else: segmentation_name = photo_name
-        bg_index          = (idx + np.random.randint(0, 200) ) % self.number_of_backgrounds #before it was just = rand(0,len(bg))
+        bg_index          = (idx + np.random.randint(0, 200) ) % self.number_of_backgrounds #before it was just = rand(0,len(bg)) which gave really bad results for 255 images
         background_name   = os.path.join(self.background_dir, str(bg_index)+'.jpg')
         if self.specific_background_path != "no": background_name = self.specific_background_path
 
-        photo_img  = io.imread(photo_name)
+        photo_img  = io.imread(photo_name)[:,:,0:3]
         target_img = io.imread(photo_name)
         background_img = io.imread(background_name) 
         segmentation_img = io.imread(segmentation_name)[:,:,0:3]
@@ -71,28 +66,9 @@ class domain_transfer_dataset(Dataset):
             sample = self.transform(sample)
         return sample
 
-class Rescale(object):
-    def __init__(self, output_size):
-        self.output_size = output_size
-
-    def __call__(self, sample):
-        sz = self.output_size
-        if sz != sample['photo'].shape[:2]: 
-            sample['photo'] = transform.resize(sample['photo'], sz, anti_aliasing=True, order=2)
-        
-        if len(sample) < 2: return sample
-
-        if sz != sample['segmentation'].shape[:2]: 
-            sample['segmentation'] = transform.resize(sample['segmentation'], sz, anti_aliasing=True, order=2)
-        if sz != sample['target'].shape[:2]: 
-            sample['target'] = transform.resize(sample['target'], sz, anti_aliasing=True, order=2)
-        if sz != sample['background'].shape[:2]: 
-            sample['background'] = transform.resize(sample['background'], sz, anti_aliasing=True, order=2)
-        return  sample
-
 class RandomCrop(object):
 
-    def __init__(self, output_size):
+    def __init__(self, output_size=(512,384)):
         self.output_size = output_size
 
     def __call__(self, sample):
@@ -142,7 +118,6 @@ class ApplyMask(object):
             segmentation_img = np.array(segmentation_img[0:3,:,:]) 
         else: 
             segmentation_img = np.array(segmentation_img[:,:,0:3])
-        
         mask_img = np.max(segmentation_img, channel_axis)
         mask_img[mask_img > 1e-3] = 1
         mask_img[mask_img < 1] = 0
@@ -157,7 +132,6 @@ class ApplyMask(object):
         kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))
         mask_img = torch.clamp(torch.nn.functional.conv2d(im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
         mask_img = np.stack((mask_img,mask_img,mask_img), axis=channel_axis)
-
         photo_img      = photo_img      *  mask_img
         background_img = background_img * (1-mask_img) 
         photo_img = photo_img + background_img
@@ -173,12 +147,12 @@ class ErodeSegmentation(object):
             dilate_sz = 100
         elif dilate_sz < 0: 
             dilate_sz = -dilate_sz
+        
         self.dilate_sz = dilate_sz
         self.kernel =  np.ones((2*dilate_sz+1, 2*dilate_sz+1))
         self.padding = (dilate_sz, dilate_sz)
         self.get_color = get_color_segmentation
         
-
     def __call__(self, sample):
         if self.get_color: return sample
         if self.dilate_sz == 100:
@@ -203,7 +177,7 @@ class ErodeSegmentation(object):
             mask_img = torch.clamp(torch.nn.functional.conv2d(im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
 
         mask_img = np.stack((mask_img,mask_img,mask_img), axis=ch_ax)
-        mask_img  = torch.from_numpy(mask_img)
+        #mask_img  = torch.from_numpy(mask_img)   # look at
         sample['segmentation'] = mask_img
         return  sample
 
@@ -276,3 +250,133 @@ class NormalizeMult(object):
         sample['segmentation'] = segmentation_img
         return sample
 
+#new classes mostly with albumentations
+class A_transforms(object):
+    def __call__(self, sample): 
+        photo_img        = sample['photo']#uint8 format
+        target_img       = sample['target']
+        segmentation_img = sample['segmentation']
+        background_img   = sample['background']
+
+        #augment all images
+        transform = A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.25),
+            ],
+            additional_targets={'background': 'image','target':'image','segmentation':'image'}
+        )
+        augmented = transform(image=photo_img, background=background_img, target=target_img, segmentation=segmentation_img)
+        augmented = clip(augmented) 
+        photo_img         = augmented["image"]
+        background_img    = augmented["background"]
+        target_img        = augmented["target"]
+        segmentation_img  = augmented["segmentation"]
+
+        p = 0.25
+        #augment input image only:
+        trms = [ # might want to reduce probabilities 
+            A.Spatter(p=p,std=0.15), # bad
+            A.RandomShadow(p=p+0.15,shadow_roi=(0,0,1,1),num_shadows_upper=1,shadow_dimension=4),
+            A.Defocus(p=p,radius=(1,4)),
+            A.Downscale(p=p, scale_min=0.4, scale_max=0.8),
+            A.ISONoise(p=0.5), #this augmentation usefull. look up what ISO does!
+            A.RandomSunFlare(p=p, src_radius=125, num_flare_circles_upper=20),
+            A.Sharpen(p=p),
+            A.RandomBrightnessContrast(p=0.5,brightness_limit=0.25, contrast_limit=0.25),            
+        ]
+        transform = A.Compose(trms)
+        augmented = transform(image=photo_img)
+        photo_img = augmented["image"]
+        
+        #fix data format
+        transform = A.Compose([
+                A.Rotate(limit=30,border_mode=cv2.BORDER_CONSTANT), # look at cv2.border modes and variations!
+                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ToTensorV2(),
+            ],
+            additional_targets={'background': 'image','target':'image','segmentation':'image'}
+        )
+
+        augmented = transform(image=photo_img, background=background_img, target=target_img, segmentation=segmentation_img)
+        sample['photo']          = augmented["image"]
+        sample['background']     = augmented["background"]
+        sample['target']         = (augmented["target"]+1)/2
+        sample['segmentation']   = augmented["segmentation"]
+
+        return sample
+
+class ToErodedMask(object): 
+    def __init__(self, erode_sz=0):        
+        self.is_dilate = erode_sz < 0
+        self.dilate_sz = np.abs(erode_sz)
+        self.kernel =  np.ones((2*self.dilate_sz + 1, 2*self.dilate_sz +1))
+        self.padding = (self.dilate_sz , self.dilate_sz )
+        
+    def __call__(self, sample):            
+        segmentation_img = sample['segmentation']
+        segmentation_img = np.array(segmentation_img) 
+        ch_ax = 2
+        mask_img = np.max(segmentation_img, ch_ax)
+        mask_img[mask_img > 1e-3] = 1
+        mask_img[mask_img < 1] = 0
+
+        im_tensor = torch.Tensor(np.expand_dims(np.expand_dims(mask_img, 0), 0))
+        kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))
+        if self.is_dilate:
+            mask_img = torch.clamp(torch.nn.functional.conv2d(im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
+        else:
+            mask_img = 1-torch.clamp(torch.nn.functional.conv2d(1-im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
+        mask_img = np.stack((mask_img,mask_img,mask_img), axis=ch_ax)
+        sample['segmentation'] = (mask_img*255).astype(np.uint8)
+
+        return  sample
+
+class AddDilatedBackground(object): 
+    def __init__(self, dilate_sz=0):        
+        self.dilate_sz = dilate_sz
+    def __call__(self, sample):
+        photo_img = sample['photo']
+        mask_img = sample['segmentation']
+        background_img = sample['background']
+        
+        transform = transforms.Compose([
+            ToErodedMask(-self.dilate_sz)
+        ])
+        mask_img = transform({'segmentation':mask_img})['segmentation']
+        mask_img[mask_img>1e-3]=1 
+            
+        photo_img      = photo_img*mask_img + background_img*(1-mask_img) 
+        sample['photo'] = photo_img
+
+        return  sample
+
+class A_Norm(object):    
+    def __call__(self, sample): 
+        transform = A.Compose([
+                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ToTensorV2(),
+            ],
+            additional_targets={'background': 'image','target':'image','segmentation':'image'}
+        )
+
+        augmented = transform(image=sample['photo'], background=sample['background'], target=sample['target'], segmentation=sample['segmentation'])
+        sample['photo']          = augmented["image"]
+        sample['background']     = augmented["background"]
+        sample['target']         = (augmented["target"]+1)/2
+        sample['segmentation']   = augmented["segmentation"]
+        return sample 
+    
+class CropAndPad(object):    
+    def __init__(self, desired_shape=(512,384)):        
+        self.desired_shape = desired_shape
+    def __call__(self, sample): 
+        image = sample['photo']
+        current_shape = image.shape[:2]
+        scale_factor = np.min(np.array(self.desired_shape)/current_shape) #make sure we don't scale 10x5 -> 9x1
+        resized_image = resize(image, (int(current_shape[0]*scale_factor), int(current_shape[1]*scale_factor)),
+                            anti_aliasing=False)
+
+        pad_amount = [(self.desired_shape[i]-resized_image.shape[i])//2 for i in range(2)]
+        padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[0]), (pad_amount[1], pad_amount[1]), (0,0)), mode='constant')
+        return padded_image 
+        

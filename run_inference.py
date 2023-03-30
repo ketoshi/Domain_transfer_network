@@ -42,6 +42,8 @@ model = get_model(model_path, device)
 model.eval()
 input_image = io.imread(img1)
 segmentation_image = io.imread(img2)
+
+#[CropAndPad(),A_Norm()]
 generated_images = model(input_image, segmentation_image)
 input_image = (input_image+1)/2 
 segmentation_image = (segmentation_image+1)/2 

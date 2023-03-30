@@ -15,7 +15,7 @@ root_f550k_dir = '/home/isac/data/f550k'
 model_path = "/home/isac/data/tensorboard_info/20230323-002150{'dilation': 0, 'erosion': 0, 'color': False, 'skip_layers': [0, 1, 2, 3, 4, 5], 'layer_channels': (3, 64, 128, 256, 512, 1024, 2048), 'function': 'train_n_epochs'}/test19.pth"
 save_folder = '/home/isac/data/use_model_output' # for generating images
 
-PROGRAM_TASK = "GENERATE" #GENERATE, EVALUATE, TRAIN 
+PROGRAM_TASK = "TRAIN" #GENERATE, EVALUATE, TRAIN 
 
 if PROGRAM_TASK == "GENERATE": #try with both backgrounds
     dataloader = get_dataloader(root_dir=root_f550k_dir,
@@ -23,11 +23,9 @@ if PROGRAM_TASK == "GENERATE": #try with both backgrounds
                                 bg_mode="validation",
                                 validation_length=500,
                                 BATCH_SIZE=3,
-                                dilation=0,
-                                erosion=0,
-                                get_color_segmentation=False
-    )
-
+                                bg_dilation=0,
+                                mask_erosion=0
+    )    
     dir = "/home/isac/data/tensorboard_info"
     sc = os.listdir(dir) 
     sc.sort()
@@ -60,18 +58,17 @@ if PROGRAM_TASK == "EVALUATE":
             model_info = json.load(json_file)
         
         bg_mode  = "255" if "bg255" in model_info else "validation"
-        usage    = "use_model_use_mask" if "bg255" in model_info else "use_model_no_mask"
-        dilation = model_info['dilation']
-        erosion  = model_info['erosion']
+        usage    = "use_mask" if "bg255" in model_info else "no_mask"
+        bg_dilation = model_info['dilation']
+        mask_erosion  = model_info['erosion']
 
         viton_500 = get_dataloader(root_dir=root_dir,
                                     usage="use_model_use_mask",
                                     bg_mode=bg_mode,
-                                    validation_length=500,
+                                    validation_lesngth=500,
                                     BATCH_SIZE=1,
-                                    dilation=dilation,
-                                    erosion=erosion,
-                                    get_color_segmentation=False
+                                    bg_dilation=bg_dilation,
+                                    mask_dilation=mask_erosion
         )
 
         f550k_500 = get_dataloader(root_dir=root_dir,
@@ -79,8 +76,8 @@ if PROGRAM_TASK == "EVALUATE":
                                     bg_mode=bg_mode,
                                     validation_length=500,
                                     BATCH_SIZE=1,
-                                    dilation=dilation,
-                                    erosion=erosion,
+                                    dilation=bg_dilation,
+                                    erosion=mask_erosion,
                                     get_color_segmentation=False
         )
 
@@ -89,8 +86,8 @@ if PROGRAM_TASK == "EVALUATE":
                                     bg_mode=bg_mode,
                                     validation_length=5000,
                                     BATCH_SIZE=1,
-                                    dilation=dilation,
-                                    erosion=erosion,
+                                    dilation=bg_dilation,
+                                    erosion=mask_erosion,
                                     get_color_segmentation=False
         )
 
@@ -99,8 +96,8 @@ if PROGRAM_TASK == "EVALUATE":
                                     bg_mode=bg_mode,
                                     validation_length=5000,
                                     BATCH_SIZE=1,
-                                    dilation=dilation,
-                                    erosion=erosion,
+                                    dilation=bg_dilation,
+                                    erosion=mask_erosion,
                                     get_color_segmentation=False
         )
 
@@ -109,16 +106,14 @@ if PROGRAM_TASK == "EVALUATE":
 
 
 
-
-
-if PROGRAM_TASK == "TRAIN": #remember to try e.g. erode function!
+if PROGRAM_TASK == "TRAIN": 
 
     train_info = {
-    'batch_size': 3, 'epochs':5, 'lr': 1e-3
+    'batch_size': 3, 'epochs':10, 'lr': 1e-3
     }
 
     # add bg255:0 in extra info if use bg255
-    extra_infos = [{'dilation':'rnd', 'erosion':'rnd','color':False }]
+    extra_infos = [{'dilation':0, 'erosion':0, 'p':0.25}]
     extra_info = extra_infos[0]
     params = {'lc':[(3,64,128,256,512,1024)], 
      'sk': [[0,1,2,3,4]],
@@ -140,7 +135,3 @@ if PROGRAM_TASK == "TRAIN": #remember to try e.g. erode function!
         model = SDTCNN(layer_channels=LAYER_CHANNELS, skip_layers=SKIP_LAYERS) # or swap with SDTCNN
         SAVE_FOLDER = '/home/isac/data/tensorboard_info/' +  datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + str(extra_info) 
         i_function(root_dir, model=model, train_info=train_info, save_folder=SAVE_FOLDER, update_dataset_per_epoch=True, extra_info=extra_info)
-
-
-# still need to run when trained with bad segmentation
-# check quickly if can add shadow to image with existing network.

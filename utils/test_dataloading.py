@@ -1,23 +1,21 @@
-import argparse
-import os
 import matplotlib.pyplot as plt
 import torch
 import torchvision
 from utils import tensor_to_saveable_img, get_dataloader
-from dataset import domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, ErodeSegmentation, LightingMult, RotateMult, NormalizeMult, Rescale, Rescale_bg_down_and_up
 import warnings
 warnings.filterwarnings('ignore')
 
 root_dir = '/home/isac/data/viton_hd' 
 
+#v1
 dataset_loader = get_dataloader(root_dir=root_dir,
-                            usage='train',
-                            bg_mode="validation",
-                            validation_length=3,
-                            BATCH_SIZE=3,
-                            dilation=0,
-                            erosion=0,
-                            get_color_segmentation=False
+                        usage="train", 
+                        bg_mode="train", 
+                        validation_length=500, 
+                        BATCH_SIZE=3, 
+                        bg_dilation=0, 
+                        mask_erosion=0, 
+                        special_img = "no"
 )
 
 for x in dataset_loader:
@@ -30,5 +28,3 @@ for x in dataset_loader:
     break
 grid_tot = torch.concat((a1,a2,a3),dim=1)
 plt.imsave('data/test_results/test_image0.jpg', tensor_to_saveable_img(grid_tot))
-
-print('complete, check out images.')

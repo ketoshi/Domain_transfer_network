@@ -11,7 +11,7 @@ import torchvision
 from torch import tensor
 from tqdm import tqdm
 sys.path.append('utils') # important
-from dataset import domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, LightingMult, RotateMult, NormalizeMult, ErodeSegmentation
+from dataset import A_transforms,ToErodedMask, domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, LightingMult, RotateMult, NormalizeMult, ErodeSegmentation
 from layers import *
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
@@ -22,21 +22,38 @@ import torchmetrics
 from torchvision import transforms
 from torch.utils.data.dataloader import DataLoader 
 from torch import device
+from skimage.transform import resize
 #-----------------Create dataset functions-------------------
 
-def save_dataset_images(folder:str, dataset:DataLoader):
-    for idx in tqdm(range(len(dataset))):
-        sample = dataset[idx]
-        img = sample['photo']
-        file_name = os.path.join(folder, str(idx)+'.jpg')
-        plt.imsave(file_name, img)
+def create_folder(root_dir):
+    if not os.path.isdir(root_dir):         os.mkdir(root_dir)
+    photo_dir        = os.path.join(root_dir,"photo")
+    segmentation_dir = os.path.join(root_dir,"segmentation")
+    if not os.path.isdir(photo_dir):        os.mkdir(photo_dir)
+    if not os.path.isdir(segmentation_dir): os.mkdir(segmentation_dir)
 
-def sort_key(file_name:str):
-    file_number_str = re.match('[0-9]+', file_name)
-    if file_number_str is not None:
-        return int(file_number_str.group())
-    else: 
-        return -1
+def resize_and_pad_image(image, desired_shape=(512, 384)):
+    current_shape = image.shape[:2]
+    scale_factor = np.min(np.array(desired_shape)/current_shape) #make sure we don't scale 10x5 -> 9x1
+    resized_image = resize(image, (int(current_shape[0]*scale_factor), int(current_shape[1]*scale_factor)),
+                           anti_aliasing=False)
+
+    pad_amount = [(desired_shape[i]-resized_image.shape[i])//2 for i in range(2)]
+    padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[0]), (pad_amount[1], pad_amount[1]), (0,0)), mode='constant')
+    return padded_image 
+
+def rescale_and_save(save_folder, image_folder, resize_shape=(512,384)):
+    if not os.path.isdir(save_folder): os.mkdir(save_folder)
+    if len(os.listdir(save_folder)) < 10:
+        image_paths = os.listdir(image_folder)
+        i = 0
+        for image_name in tqdm(image_paths):
+            image_path = os.path.join(image_folder, image_name)
+            image = io.imread(image_path)
+            image = resize_and_pad_image(image, resize_shape)
+            file_name = os.path.join(save_folder,"img"+str(i)+".png")
+            plt.imsave(file_name, image)
+            i+=1
 
 def write_csv(csv_file_path:str, 
               image_dir:str, 
@@ -50,7 +67,7 @@ def write_csv(csv_file_path:str,
         writer.writerow([description])
                 
         entries = os.listdir(image_dir)
-        entries.sort(key=sort_key)
+        entries.sort()
 
         for entry in entries:
             if entry[-1]!='g': continue
@@ -70,6 +87,28 @@ def combine_csv(save_path:str,
             f1_file = f1.iloc[idx, 0]
             f2_file = f2.iloc[idx, 0]
             writer.writerow([f1_file, f2_file])           
+
+def create_dataset_csv(root_dir):
+    dir_ph = os.path.join(root_dir,"photo")
+    dir_seg = os.path.join(root_dir,"segmentation")
+    if len(os.listdir(dir_seg)) > 10:
+        csv_ph = os.path.join(root_dir,"photo.csv")
+        csv_seg = os.path.join(root_dir,"segmentation.csv")
+        csv_data = os.path.join(root_dir,"dataset.csv")
+        write_csv(csv_ph, dir_ph, overwrite=True)
+        write_csv(csv_seg, dir_seg, overwrite=True)
+        combine_csv(csv_data, csv_ph, csv_seg)
+        os.remove(csv_ph)
+        os.remove(csv_seg)
+
+def create_folder_and_resize_photo(new_folder_name:str, image_folder:str, resize_shape=(512,384)):
+
+    root_dir = new_folder_name
+    save_photo_dir = os.path.join(root_dir,"photo")
+
+    create_folder(root_dir)
+    rescale_and_save(image_folder=image_folder, save_folder=save_photo_dir, resize_shape=resize_shape)
+    create_dataset_csv(root_dir)
 
 #----------training & using network---------------
 
@@ -108,19 +147,19 @@ def get_dataloader( root_dir:str,
                     bg_mode="train", 
                     validation_length=500, 
                     BATCH_SIZE=3, 
-                    dilation=0, 
-                    erosion=0, 
-                    get_color_segmentation=False):
-    trms = [Rescale((512,384)), Rescale_bg_down_and_up()] 
-    if usage != "use_model_no_mask": 
-        trms.append(ApplyMask(dilation, get_color_segmentation))
-    trms.extend([ ErodeSegmentation(erosion, get_color_segmentation), ToTensor() ])
+                    mask_erosion=0, 
+                    bg_dilation=0, 
+                    special_img = "no"):
+    
+    trms = [RandomCrop((512,384))] 
+    if usage != "no_mask": 
+        trms.append( AddDilatedBackground(bg_dilation) )
+    trms.append( ToErodedMask(mask_erosion) )
     if usage == "train":  
-        trms.extend([ LightingMult(), RotateMult() ] )
-    trms.append(NormalizeMult())
+        trms.append( A_transforms() )
+    else: trms.append( A_Norm() )
     trms = transforms.Compose(trms)
-
-    special_img = "/home/isac/data/bg_test.jpg" if bg_mode == "special" else "no"
+    
     dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode=bg_mode, specific_background_path=special_img)
     train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-validation_length,validation_length], generator=torch.Generator().manual_seed(0))
     
@@ -143,7 +182,7 @@ def train_n_epochs(root_dir:str,
     model = model.to(device)
     bg_mode = "255" if "bg255" in extra_info else "train"
 
-    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, dilation=extra_info['dilation'], erosion=extra_info['erosion'], get_color_segmentation=extra_info['color'])    
+    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
     ld = len(dataset_loader)
 
     ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
@@ -157,7 +196,7 @@ def train_n_epochs(root_dir:str,
     if save_folder=="-1": writer = SummaryWriter()
     
     for epoch in range(train_info['epochs']):   
-        if update_dataset_per_epoch and epoch > 0: dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", dilation=extra_info['dilation'], erosion=extra_info['erosion'], get_color_segmentation=extra_info['color'])   
+        if update_dataset_per_epoch and epoch > 0:  dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
 
         for ix, x in enumerate(tqdm(dataset_loader)):
             i_scalar = epoch*ld + ix
@@ -179,7 +218,7 @@ def train_n_epochs(root_dir:str,
         torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
         
         if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion'], 'get_color_segmentation':extra_info['color']}
+            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
             info_file = os.path.join(save_folder,'model_info.json')
             with open(info_file, 'w') as outfile:
                 json.dump(info, outfile)
@@ -195,7 +234,7 @@ def train_n_epochs_twice(root_dir:str,
     model = model.to(device)
     bg_mode = "255" if "bg255" in extra_info else "train"
 
-    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, dilation=extra_info['dilation'], erosion=extra_info['erosion'], get_color_segmentation=extra_info['color'])    
+    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
     ld = len(dataset_loader)
 
     ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
@@ -209,8 +248,8 @@ def train_n_epochs_twice(root_dir:str,
     if save_folder=="-1": writer = SummaryWriter()
     
     for epoch in range(train_info['epochs']):   
-        if update_dataset_per_epoch and epoch > 0: dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", dilation=extra_info['dilation'], erosion=extra_info['erosion'], get_color_segmentation=extra_info['color'])   
-
+        if update_dataset_per_epoch and epoch > 0: dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+            
         for ix, x in enumerate(tqdm(dataset_loader)):
             i_scalar = epoch*ld + ix
             optimizer.zero_grad()
@@ -230,12 +269,12 @@ def train_n_epochs_twice(root_dir:str,
         grid2 = torchvision.utils.make_grid(generated_image)
         grid3 = torchvision.utils.make_grid(generated_image2)
         grid4 = torchvision.utils.make_grid(target_image)
-        grid = torch.concatenate((grid1,grid2,grid3,grid4),dim=1)
+        grid  = torch.concatenate((grid1,grid2,grid3,grid4),dim=1)
         writer.add_image('images', grid, global_step=epoch)
         torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
         
         if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion'], 'get_color_segmentation':extra_info['color']}
+            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
             info_file = os.path.join(save_folder,'model_info.json')
             with open(info_file, 'w') as outfile:
                 json.dump(info, outfile)
@@ -321,11 +360,11 @@ def save_images(savefolder:str,
     
     if as_batch :    
         grid = torchvision.utils.make_grid(batch_images)
-        save_path = os.path.join(savefolder, "img" + str(existing_images)+".jpg")
+        save_path = os.path.join(savefolder, "img" + str(existing_images)+".png")
         plt.imsave(save_path, tensor_to_saveable_img(grid))
     else :
         for i in range( batch_images.shape[0] ) :
-            save_path = os.path.join(savefolder, "img" + str(existing_images+i)+".jpg")
+            save_path = os.path.join(savefolder, "img" + str(existing_images+i)+".png")
             plt.imsave(save_path, tensor_to_saveable_img(batch_images[i]))
    
 def generate_images(dataloader:DataLoader,
@@ -373,3 +412,34 @@ def generate_images(dataloader:DataLoader,
         else: break
         if ix > max_images-2 and max_images > 0: break
 
+def compare_bg_images(dataloader:DataLoader, save_folder, sub_img=(-1,0,0,0), dim='vertical'):
+    for x in dataloader:
+        break
+    if dim=='vertical': dim = 1
+    else: dim = 2
+    target = x['target'].to(float)
+    mask = (x['segmentation']+1)/2
+    mask.to(int)
+    background = x['background'].to(float)
+    output = target*mask + background*(1-mask)
+    if sub_img[0]>=0:
+        output = output[:,:,sub_img[0]:sub_img[1],sub_img[2]:sub_img[3]]
+        target = target[:,:,sub_img[0]:sub_img[1],sub_img[2]:sub_img[3]]
+
+    for i in range(x['target'].shape[0]):
+        target1      = target[    i, :, :, :]
+        output1      = output[    i, :, :, :]
+        
+        grid_tot = torch.cat((target1, output1),dim=dim)
+        save_images(save_folder, grid_tot, as_batch=True)
+
+def concat_save_2imgs(save_path:str, img1:str, img2:str, dim='vertical'):
+    if dim=='vertical': dim = 0
+    else: dim = 1
+    img1 = io.imread(img1)[:,:,:3]
+    img2 = io.imread(img2)[:,:,:3]
+    try:
+        grid = np.concatenate((img1,img2),axis=dim)
+    except: 
+        grid = np.concatenate((img1,img2),axis=1-dim)
+    plt.imsave(save_path, grid)

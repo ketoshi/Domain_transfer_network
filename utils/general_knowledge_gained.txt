@@ -8,5 +8,9 @@ we see that only using lpips not so good, but ok with psnr/ssim (combine mse wit
 
 might want to check how segmentation becomes after swapping 80% of bg
 
-
+png are lossless not jpg.. ;_; png better in all ways!!!!
 eroision 10 10x slower
+
+
+just using norm is more common then batch norm in image generation!
+will use albumentations for it's big library of augmentations
