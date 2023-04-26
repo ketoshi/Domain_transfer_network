@@ -14,3 +14,12 @@ eroision 10 10x slower
 
 just using norm is more common then batch norm in image generation!
 will use albumentations for it's big library of augmentations
+
+#boundary not improved?
+#need to improve boundary?
+#most important inlightin - higher priority,   since dilation=0 --> gives ok results anyway
+#try using L1 loss instead of MSE + add GAN loss
+#can use some structure like ARshadowan (similar to one right now)
+# focus more in lighting +   Wangxin will look at generating shadow to further augmnent images
+# start of no shadow + L1 ,   then try add GAN loss
+# if want can look at editing albumentations library: add random shadow

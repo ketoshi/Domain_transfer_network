@@ -28,3 +28,4 @@ for x in dataset_loader:
     break
 grid_tot = torch.concat((a1,a2,a3),dim=1)
 plt.imsave('data/test_results/test_image0.jpg', tensor_to_saveable_img(grid_tot))
+print('images saved')

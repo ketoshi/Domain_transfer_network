@@ -7,7 +7,7 @@ def scan_scores(dir):
     osl.sort()
     tot_list = {'ssim_viton':[],'lpips_viton':[],'psnr_viton':[],'ssim_f550k':[],'lpips_f550k':[],'psnr_f550k':[],'fid':[],'filename':[]}
     for x in osl:
-        sc = os.path.join(dir,x,"scores.json")
+        sc = os.path.join(dir,x,"scores1.json")
         if os.path.isfile(sc): 
             #print('yes')
             f = open(sc)
@@ -36,9 +36,7 @@ def table_format_print(is_str, format_name, *params):
 
 
 
-
-
-tot_list = scan_scores(dir = '/home/isac/data/tensorboard_info')
+tot_list = scan_scores(dir = '/home/isac/data/tensorboard_info_sorted/already_rated')
 dist     = 15
 decimals = 4
 format_str = "{:<{}} {:<{}} {:<{}} {:<{}} {:<{}} {:<{}} {:<{}} ".format
@@ -48,6 +46,8 @@ table_format_print(True,format_str,    'ssim_viton','lpips_viton','psnr_viton','
 table_format_print(True,format_str,    'high','low','high','high','low','high','low')
 #print('first 15k')
 for i in range(len(tot_list['fid'])):
+    if i in [5,12]: print(' new') 
+    if i in [5,6,7,12,13,14,18]: continue
     #if i==5:print('now 255');print(tot_list['filename'][i])
     ssim_viton  = tot_list['ssim_viton'][i] 
     lpips_viton = tot_list['lpips_viton'][i]
@@ -56,5 +56,9 @@ for i in range(len(tot_list['fid'])):
     lpips_f550k = tot_list['lpips_f550k'][i]
     psnr_f550k  = tot_list['psnr_f550k'][i] 
     fid         = tot_list['fid'][i]     
+
     table_format_print( False, format_float,   ssim_viton,lpips_viton,psnr_viton,ssim_f550k,lpips_f550k,psnr_f550k,fid  )        
+
+
+
 

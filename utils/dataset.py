@@ -27,8 +27,18 @@ class domain_transfer_dataset(Dataset):
         self.has_segmentation = os.path.isfile(csv_path)
         if not self.has_segmentation: csv_path = os.path.join(root_dir,'photo.csv') 
         
-        self.csv = pd.read_csv(csv_path)
-        if subset > 0: self.csv = self.csv.iloc[0:subset,:] 
+        csv = pd.read_csv(csv_path)
+        if subset >= len(csv):
+            csv_len = len(csv)
+            add_n_elem = subset-len(csv)
+            elem_arr = [0 for x in range(add_n_elem)] 
+            for i_add in range(add_n_elem):
+                elem_arr[i_add] = csv.iloc[i_add % csv_len] 
+            csv_elems = pd.DataFrame(elem_arr, columns=csv.columns)
+            csv = pd.concat([csv,csv_elems])
+
+        elif subset > 0: csv = csv.iloc[0:subset,:] 
+        self.csv = csv
         self.root_dir = root_dir
         self.transform = transform
         if background_mode == "train": 
@@ -250,7 +260,8 @@ class NormalizeMult(object):
         sample['segmentation'] = segmentation_img
         return sample
 
-#new classes mostly with albumentations
+#classes above except RandomCrop not used after apr 1st, classes mostly with albumentations
+
 class A_transforms(object):
     def __call__(self, sample): 
         photo_img        = sample['photo']#uint8 format
@@ -275,14 +286,14 @@ class A_transforms(object):
         p = 0.25
         #augment input image only:
         trms = [ # might want to reduce probabilities 
-            A.Spatter(p=p,std=0.15), # bad
-            A.RandomShadow(p=p+0.15,shadow_roi=(0,0,1,1),num_shadows_upper=1,shadow_dimension=4),
-            A.Defocus(p=p,radius=(1,4)),
-            A.Downscale(p=p, scale_min=0.4, scale_max=0.8),
+            #A.Spatter(p=p,std=0.05), # bad
+            #A.RandomShadow(p=0.5,shadow_roi=(0,0,1,1),num_shadows_upper=4,shadow_dimension=4),
+            A.Defocus(p=p,radius=(1,2)),    
+            A.Downscale(p=p, scale_min=0.75, scale_max=0.8,interpolation=cv2.INTER_NEAREST),
             A.ISONoise(p=0.5), #this augmentation usefull. look up what ISO does!
-            A.RandomSunFlare(p=p, src_radius=125, num_flare_circles_upper=20),
-            A.Sharpen(p=p),
-            A.RandomBrightnessContrast(p=0.5,brightness_limit=0.25, contrast_limit=0.25),            
+            #A.RandomSunFlare(p=p, src_radius=125, num_flare_circles_upper=20),
+            A.Sharpen(p=p,alpha=(0.1,0.3)),
+            A.RandomBrightnessContrast(p=0.5,brightness_limit=0.20, contrast_limit=0.20),            
         ]
         transform = A.Compose(trms)
         augmented = transform(image=photo_img)
@@ -306,7 +317,10 @@ class A_transforms(object):
         return sample
 
 class ToErodedMask(object): 
-    def __init__(self, erode_sz=0):        
+    def __init__(self, erode_sz=0):   
+        if 100 == np.abs(erode_sz):
+            self.is_rnd = True
+        else :self.is_rnd = False
         self.is_dilate = erode_sz < 0
         self.dilate_sz = np.abs(erode_sz)
         self.kernel =  np.ones((2*self.dilate_sz + 1, 2*self.dilate_sz +1))
@@ -319,13 +333,22 @@ class ToErodedMask(object):
         mask_img = np.max(segmentation_img, ch_ax)
         mask_img[mask_img > 1e-3] = 1
         mask_img[mask_img < 1] = 0
+        if self.is_rnd:
+            erode_sz = np.random.randint(-5,6)
+            is_dilate = erode_sz < 0
+            dilate_sz = np.abs(erode_sz)
+        else: 
+            is_dilate = self.is_dilate
+            dilate_sz = self.dilate_sz
+        kernel =  np.ones((2*dilate_sz + 1, 2*dilate_sz +1))
+        padding = (dilate_sz , dilate_sz )
 
         im_tensor = torch.Tensor(np.expand_dims(np.expand_dims(mask_img, 0), 0))
-        kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(self.kernel, 0), 0))
-        if self.is_dilate:
-            mask_img = torch.clamp(torch.nn.functional.conv2d(im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
+        kernel_tensor = torch.Tensor(np.expand_dims(np.expand_dims(kernel, 0), 0))
+        if is_dilate:
+            mask_img = torch.clamp(torch.nn.functional.conv2d(im_tensor, kernel_tensor, padding=padding), 0, 1)[0,0,:,:]
         else:
-            mask_img = 1-torch.clamp(torch.nn.functional.conv2d(1-im_tensor, kernel_tensor, padding=self.padding), 0, 1)[0,0,:,:]
+            mask_img = 1-torch.clamp(torch.nn.functional.conv2d(1-im_tensor, kernel_tensor, padding=padding), 0, 1)[0,0,:,:]
         mask_img = np.stack((mask_img,mask_img,mask_img), axis=ch_ax)
         sample['segmentation'] = (mask_img*255).astype(np.uint8)
 
@@ -352,6 +375,15 @@ class AddDilatedBackground(object):
 
 class A_Norm(object):    
     def __call__(self, sample): 
+        if len(sample)>10:
+            transform = A.Compose([
+                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ToTensorV2(),
+            ])
+            augmented = transform(image=sample)['image']
+
+            return augmented
+
         transform = A.Compose([
                 A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                 ToTensorV2(),
@@ -366,17 +398,32 @@ class A_Norm(object):
         sample['segmentation']   = augmented["segmentation"]
         return sample 
     
-class CropAndPad(object):    
+class CropAndPad(object):    #todo fix this
     def __init__(self, desired_shape=(512,384)):        
         self.desired_shape = desired_shape
-    def __call__(self, sample): 
-        image = sample['photo']
+    def __call__(self, image): 
         current_shape = image.shape[:2]
         scale_factor = np.min(np.array(self.desired_shape)/current_shape) #make sure we don't scale 10x5 -> 9x1
         resized_image = resize(image, (int(current_shape[0]*scale_factor), int(current_shape[1]*scale_factor)),
                             anti_aliasing=False)
 
-        pad_amount = [(self.desired_shape[i]-resized_image.shape[i])//2 for i in range(2)]
-        padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[0]), (pad_amount[1], pad_amount[1]), (0,0)), mode='constant')
+        pad_amount = [(self.desired_shape[i]-resized_image.shape[i]) for i in range(2)]
+        pad_amount = [pad_amount[0]//2 + pad_amount[0]%2, pad_amount[0]//2, pad_amount[1]//2, pad_amount[1]//2 + pad_amount[1]%2]
+        padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[1]), (pad_amount[2], pad_amount[3]), (0,0)), mode='constant')
         return padded_image 
+        
+class Outline(object):
+    def __init__(self, dilate_sz=4):        
+        self.dilate_sz = dilate_sz
+    def __call__(self, segmentation): 
+        t1 = transforms.Compose([
+            ToErodedMask(-self.dilate_sz)
+        ])
+        t2 = transforms.Compose([
+            ToErodedMask(self.dilate_sz)
+        ])
+        img_dilate = t1({'segmentation':segmentation})['segmentation']
+        img_erode = t2({'segmentation':segmentation})['segmentation']
+        img_outline = img_dilate - img_erode 
+        return img_outline
         

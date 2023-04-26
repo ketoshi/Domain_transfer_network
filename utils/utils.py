@@ -6,13 +6,18 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 import csv
+import io
 import re
 import torchvision
 from torch import tensor
 from tqdm import tqdm
 sys.path.append('utils') # important
-from dataset import A_transforms,ToErodedMask, domain_transfer_dataset, RandomCrop, ToTensor, ApplyMask, LightingMult, RotateMult, NormalizeMult, ErodeSegmentation
-from layers import *
+try:
+    from dataset import A_transforms, A_Norm, AddDilatedBackground, ToErodedMask, domain_transfer_dataset, RandomCrop
+    from layers import DTCNN, SDTCNN, GAN_discriminator, VGGPerceptualLoss,VGG_SDTCNN,VGG_discriminator
+except:
+    from utils.dataset import A_transforms, A_Norm, AddDilatedBackground, ToErodedMask, domain_transfer_dataset, RandomCrop
+    from utils.layers import DTCNN, SDTCNN, GAN_discriminator, VGGPerceptualLoss,VGG_SDTCNN,VGG_discriminator
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import json
@@ -23,8 +28,9 @@ from torchvision import transforms
 from torch.utils.data.dataloader import DataLoader 
 from torch import device
 from skimage.transform import resize
-#-----------------Create dataset functions-------------------
+from torchvision.models import vgg19, VGG19_Weights
 
+#-----------------Create dataset functions-------------------
 def create_folder(root_dir):
     if not os.path.isdir(root_dir):         os.mkdir(root_dir)
     photo_dir        = os.path.join(root_dir,"photo")
@@ -42,7 +48,7 @@ def resize_and_pad_image(image, desired_shape=(512, 384)):
     padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[0]), (pad_amount[1], pad_amount[1]), (0,0)), mode='constant')
     return padded_image 
 
-def rescale_and_save(save_folder, image_folder, resize_shape=(512,384)):
+def rescale_and_save(save_folder, image_folder, resize_shape=(512, 384)):
     if not os.path.isdir(save_folder): os.mkdir(save_folder)
     if len(os.listdir(save_folder)) < 10:
         image_paths = os.listdir(image_folder)
@@ -117,12 +123,17 @@ def get_loss(generated_image:tensor,
              ssim=0,
              lpips=0, 
              psnr=0):
-    loss = F.mse_loss(generated_image, target_image)
+    loss = F.l1_loss(generated_image, target_image)
     if type(ssim)!=type(0): loss += (1  - ssim(generated_image, target_image) )/10 #1-ssim #lpips, #1/(1+|psnr|) 
     if type(lpips)!=type(0): loss += lpips(generated_image, target_image)/10 
     if type(psnr)!=type(0): loss += 1/(1 + psnr(generated_image, target_image) )/10 
     tot_loss = loss
     return tot_loss 
+
+def GAN_get_loss(label:tensor, 
+                 predict_label:tensor):
+    GAN_loss = F.binary_cross_entropy(label,predict_label)
+    return GAN_loss 
 
 def get_loader_vals(values:dict, device:device):
     return values['photo'].to(device), values['segmentation'].to(device), values['target'].to(device)
@@ -133,23 +144,47 @@ def get_model(model_path:str, device:device):
         model_info = json.load(json_file)
     layer_channels = model_info["layer_channels"]
     skip_layers = model_info["skip_layers"]
+    is_try = True
     try: 
-        model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device) 
-        model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
-    except:
-        model = SDTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device) 
-        model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
+        if is_try:
+            model = DTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device) 
+            model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
+            is_try=False
+    except: 
+        pass
+    try: 
+        if is_try:
+            model = SDTCNN(layer_channels=layer_channels, skip_layers=skip_layers).to(device) 
+            model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
+            is_try=False
+    except: 
+        pass
+    try: 
+        if is_try:
+            model = VGG_SDTCNN(lay=28).to(device) 
+            model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
+            is_try=False
+    except: 
+        pass
+    try: 
+        if is_try:
+            model = VGG_SDTCNN(lay=35).to(device) 
+            model.load_state_dict( torch.load( model_path, map_location=torch.device(device) ) )
+            is_try=False
+    except: 
+        pass
 
     return model
 
 def get_dataloader( root_dir:str,
                     usage="train", 
-                    bg_mode="train", 
-                    validation_length=500, 
+                    bg_mode="train", #train,test,255
+                    validation_length=10, 
                     BATCH_SIZE=3, 
                     mask_erosion=0, 
                     bg_dilation=0, 
-                    special_img = "no"):
+                    special_img = "no",
+                    subset = -1):
     
     trms = [RandomCrop((512,384))] 
     if usage != "no_mask": 
@@ -160,15 +195,15 @@ def get_dataloader( root_dir:str,
     else: trms.append( A_Norm() )
     trms = transforms.Compose(trms)
     
-    dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode=bg_mode, specific_background_path=special_img)
+    dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode=bg_mode, specific_background_path=special_img, subset=subset)
     train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-validation_length,validation_length], generator=torch.Generator().manual_seed(0))
     
     active_dataset = train_set
     is_shuffle = True
-    if usage != "train":
+    if usage != "train" and usage != "train2":
         active_dataset = val_set
         is_shuffle = False
-    
+
     dataset_loader = torch.utils.data.DataLoader(active_dataset, batch_size=BATCH_SIZE, shuffle=is_shuffle, num_workers=4)
     return dataset_loader
 
@@ -178,6 +213,7 @@ def train_n_epochs(root_dir:str,
                    save_folder="-1", 
                    update_dataset_per_epoch = True, 
                    extra_info={0:0}):
+    
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
     bg_mode = "255" if "bg255" in extra_info else "train"
@@ -185,6 +221,7 @@ def train_n_epochs(root_dir:str,
     dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
     ld = len(dataset_loader)
 
+    #VGG_loss = VGGPerceptualLoss(extra_info['resize'], device)
     ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
     psnr = torchmetrics.PeakSignalNoiseRatio().to(device) if "psnr" in extra_info else 1
     with warnings.catch_warnings():
@@ -205,6 +242,7 @@ def train_n_epochs(root_dir:str,
             input_image, segmentation_image, target_image = get_loader_vals(x, device)
             generated_image = model(input_image, segmentation_image)
             loss = get_loss(generated_image, target_image, ssim=ssim, lpips=lpips, psnr=psnr)
+            #loss = VGG_loss(generated_image, target_image, extra_info['feature_layers'])
 
             writer.add_scalar('Training Loss', loss, global_step=i_scalar)
             loss.backward()
@@ -280,6 +318,156 @@ def train_n_epochs_twice(root_dir:str,
                 json.dump(info, outfile)
     writer.close()
 
+def train_GAN_epochs(root_dir:str, 
+                   model:SDTCNN, 
+                   discriminator:GAN_discriminator,
+                   train_info:dict, 
+                   save_folder="-1", 
+                   update_dataset_per_epoch = True, 
+                   extra_info={0:0}):
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    
+    discriminator = discriminator.to(device)
+    bg_mode = "255" if "bg255" in extra_info else "train"
+
+    BATCH_SIZE = train_info['batch_size']
+    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=BATCH_SIZE, usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+    ld = len(dataset_loader)
+
+    ssim,psnr,lpips = 1,1,1
+    gen_optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
+    disc_optimizer = optim.Adam(discriminator.parameters(), lr=train_info['lr'])
+
+    writer = SummaryWriter(save_folder)
+    if save_folder=="-1": writer = SummaryWriter()
+    for epoch in range(train_info['epochs']):   
+        dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=(ld-1)*BATCH_SIZE)    
+
+        for ix, x in enumerate(tqdm(dataset_loader)):
+            i_scalar = epoch*ld + ix
+            
+            input_image, segmentation_image, target_image = get_loader_vals(x, device)
+            generated_image = model(input_image, segmentation_image)
+            
+            real_label = discriminator(target_image)
+            gen_label = discriminator(generated_image)
+            real_target = torch.ones((BATCH_SIZE,1),requires_grad=True).to(device)
+            gen_target = torch.zeros((BATCH_SIZE,1),requires_grad=True).to(device)
+
+            if i_scalar%3==0: 
+                disc_optimizer.zero_grad()
+                disc_loss =  GAN_get_loss(gen_label, gen_target)/1500
+                disc_loss += GAN_get_loss(real_label, real_target)/1500
+                disc_loss.backward(retain_graph=True)
+                disc_optimizer.step()
+
+            gen_optimizer.zero_grad()
+            gen_loss = get_loss(generated_image, target_image, ssim=ssim, lpips=lpips, psnr=psnr)   
+            gen_loss += GAN_get_loss(gen_label.detach(), real_target)/1500
+
+            writer.add_scalar('Training Loss', gen_loss.item(), global_step=i_scalar)
+            gen_loss.backward()   
+            gen_optimizer.step()
+
+        grid1 = torchvision.utils.make_grid((input_image+1)/2)
+        grid2 = torchvision.utils.make_grid(generated_image)
+        grid3 = torchvision.utils.make_grid(target_image)
+        grid = torch.concatenate((grid1,grid2,grid3),dim=1)
+        writer.add_image('images', grid, global_step=epoch)
+        if epoch % 2 == 0:
+            torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
+            torch.save(discriminator.state_dict(), save_folder + "/disc"+str(epoch)+".pth")
+        if epoch == 0:
+            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
+            info_file = os.path.join(save_folder,'model_info.json')
+            with open(info_file, 'w') as outfile:
+                json.dump(info, outfile)
+    writer.close()
+
+def train_GAN2_epochs(root_dir:str, 
+                   model:SDTCNN, 
+                   discriminator:GAN_discriminator,
+                   train_info:dict, 
+                   save_folder="-1", 
+                   update_dataset_per_epoch = True, 
+                   extra_info={0:0}):
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model_path = "/home/isac/data/tensorboard_info/20230422-185344vgg19stdnn_lay35_l1_gan/test8.pth"
+    disc_path = "/home/isac/data/tensorboard_info/20230422-185344vgg19stdnn_lay35_l1_gan/disc8.pth"
+    
+    model = VGG_SDTCNN(lay=35).to(device)
+    model.load_state_dict( torch.load(model_path, map_location=torch.device(device)) )  
+
+    discriminator = VGG_discriminator(lay=28).to(device)
+    discriminator.load_state_dict( torch.load(disc_path, map_location=torch.device(device)) )  
+
+    bg_mode = "255" if "bg255" in extra_info else "train"
+    BATCH_SIZE = train_info['batch_size']
+    root_dir_viton = "/home/isac/data/viton_hd"
+    root_dir_wild = "/home/isac/data/f550k"
+    dataset_loader_viton = get_dataloader(root_dir_viton, BATCH_SIZE=BATCH_SIZE, usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+    ld = len(dataset_loader_viton)-1
+    ssim,psnr,lpips = 1,1,1
+    gen_optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
+    disc_optimizer = optim.Adam(discriminator.parameters(), lr=train_info['lr'])
+
+    writer = SummaryWriter(save_folder)
+    if save_folder=="-1": writer = SummaryWriter()
+    for epoch in range(train_info['epochs']):   
+        dataset_loader_viton = get_dataloader(root_dir_viton, BATCH_SIZE=BATCH_SIZE, usage="train2", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=ld*BATCH_SIZE)    
+        dataset_loader_wild = get_dataloader(root_dir_wild, BATCH_SIZE=BATCH_SIZE, usage="train2", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=ld*BATCH_SIZE)    
+
+        for ix, datas in tqdm(enumerate(zip(dataset_loader_viton, dataset_loader_wild)),total=ld): # fail with dataloder + iter
+            viton_data = datas[0]
+            wild_data = datas[1]
+            i_scalar = epoch*ld + ix
+            input_image_viton, segmentation_image_viton, target_image_viton = get_loader_vals(viton_data, device)
+            input_image_wild, segmentation_image_wild, target_image_wild = get_loader_vals(wild_data, device)
+
+            generated_image_viton = model(input_image_viton, segmentation_image_viton)
+            generated_image_wild = model(input_image_wild, segmentation_image_wild)
+            gen_viton_label = discriminator(generated_image_viton)
+            gen_wild_label = discriminator(generated_image_wild)
+            real_target = torch.ones((BATCH_SIZE,1),requires_grad=True).to(device)
+            gen_target = torch.zeros((BATCH_SIZE,1),requires_grad=True).to(device)
+
+            if i_scalar%3==0: 
+                disc_optimizer.zero_grad()
+                real_viton_label = discriminator(target_image_viton)
+                disc_loss  = GAN_get_loss(real_viton_label, real_target)/1500
+                disc_loss += GAN_get_loss(gen_viton_label,  gen_target)/1500
+                disc_loss += GAN_get_loss(gen_wild_label,   gen_target)/5000
+                disc_loss.backward(retain_graph=True)
+                disc_optimizer.step()
+            
+            gen_optimizer.zero_grad()
+            gen_loss = get_loss(generated_image_viton, target_image_viton, ssim=ssim, lpips=lpips, psnr=psnr)   
+            gen_loss += GAN_get_loss(gen_viton_label.detach(), real_target)/1500
+            gen_loss += GAN_get_loss(gen_wild_label.detach(), real_target)/4000
+
+            writer.add_scalar('Training Loss', gen_loss.item(), global_step=i_scalar)
+            gen_loss.backward()   
+            gen_optimizer.step()
+
+        grid1 = torchvision.utils.make_grid((input_image_wild+1)/2)
+        grid2 = torchvision.utils.make_grid(generated_image_wild)
+        grid3 = torchvision.utils.make_grid(target_image_wild)
+        grid = torch.concatenate((grid1,grid2,grid3),dim=1)
+        writer.add_image('images', grid, global_step=epoch)
+
+        if epoch % 2 == 0:
+            torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
+            torch.save(discriminator.state_dict(), save_folder + "/disc"+str(epoch)+ ".pth")
+        if epoch == 0:
+            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
+            info_file = os.path.join(save_folder,'model_info.json')
+            with open(info_file, 'w') as outfile:
+                json.dump(info, outfile)
+    writer.close()
+
 def get_psnr_lpips_ssim(target_data:tensor, 
                         generated_data:tensor, 
                         model:DTCNN,#OR SDTCNN
@@ -331,14 +519,15 @@ def get_metrics(model_path:str,
     device = score_and_device['device']
     model = get_model(model_path, device)
     model.eval()
-    scores1 = get_psnr_lpips_ssim(viton_500, viton_500, model, score_and_device, "viton")
-    scores2 = get_psnr_lpips_ssim(viton_500, f550k_500, model, score_and_device, "f550k")
-    if 'viton' not in score_and_device:
+    with torch.no_grad():
+        scores1 = get_psnr_lpips_ssim(viton_500, viton_500, model, score_and_device, "viton")
+        scores2 = get_psnr_lpips_ssim(viton_500, f550k_500, model, score_and_device, "f550k")
+    if 'fid' not in score_and_device:
         fid_score={'fid':-1}
     else:    
         fid_score = get_fid_score(viton_5000, f550k_5000, model, score_and_device)
     scores = scores1 | scores2 | fid_score
-    file = os.path.join( os.path.dirname(model_path), 'scores.json')
+    file = os.path.join( os.path.dirname(model_path), 'scores1.json')#scores1 == new test
     with open(file, 'w') as outfile:
         json.dump(scores, outfile)
 
@@ -377,6 +566,11 @@ def generate_images(dataloader:DataLoader,
     model = get_model(model_path, device)
     model.eval()
     ix = 0
+
+    s1 = os.path.join(save_folder,"photo")
+    s2 = os.path.join(save_folder,"segmentation")
+
+
     for x in tqdm(dataloader):
         input_image, segmentation_image, target_image = get_loader_vals(x, device)
         generated_images = model(input_image, segmentation_image)
@@ -408,6 +602,13 @@ def generate_images(dataloader:DataLoader,
                 ix+=1
         elif photo_mode == 2:
             save_images(save_folder, input_image, as_batch=False)
+            ix+=1
+        elif photo_mode == 3:
+            save_images(s1, generated_images, as_batch=False)
+            save_images(s2, segmentation_image, as_batch=False)
+            ix+=1
+        elif photo_mode == 4:
+            save_images(save_folder, generated_images, as_batch=False)
             ix+=1
         else: break
         if ix > max_images-2 and max_images > 0: break
@@ -443,3 +644,52 @@ def concat_save_2imgs(save_path:str, img1:str, img2:str, dim='vertical'):
     except: 
         grid = np.concatenate((img1,img2),axis=1-dim)
     plt.imsave(save_path, grid)
+
+#fun remove later
+def print_np_img(img, space = 4):
+
+    if np.max(img)<2: img *= 255
+    img = img[:,:,0].astype(int)
+    Y, X = img.shape
+    
+    format_str1 = ""
+    for x in range(X):
+        format_str1 += "{:<{}}"
+    format_str = format_str1.format
+    
+    spaces = [space]*X
+    for y in range(Y):
+        im_row = list(img[y,:]) 
+        params = [elem for pair in zip(im_row, spaces) for elem in pair]
+        print(format_str(*params))
+
+def print_colored_box(arr):
+    c = [92,93,91,95,96,94,97,98,2,90,7]
+    imin = 0
+    cd = {}
+    for i in c:
+        imax = imin + 255//len(c)
+        cd[(imin,imax)]=str(i)
+        imin=imax
+
+    bc = '1'
+    b_char = '\u2588'
+    for i in arr:
+        bg_code='1'
+        for x in cd:
+            if i >=x[0] and i < x[1]:
+                bg_code = cd[x]
+        top_border = f'\x1b[{bc};{bg_code}m{b_char}\x1b[0m'
+        print(top_border,end="")
+    print("")
+
+def print_colored_img(arr,scale=3):
+    arr = arr[:,:,0]
+    Y,X = arr.shape
+    Y = [y for y in range(Y)][::scale]
+    
+    for y in Y:
+        arr2 = list(arr[y,:].astype(int))[::scale]
+        print_colored_box(arr2)
+
+#add scheduler and run new 
