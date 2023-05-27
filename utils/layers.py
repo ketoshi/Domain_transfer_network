@@ -158,15 +158,20 @@ class Single_Decoder(nn.Module):
         return z
 
 class SDTCNN(nn.Module):
-    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1], img_sz=(-1000,-1000)):
+    def __init__(self, layer_channels=(3,64,128,256,512), skip_layers=[-1], img_sz=(-1000,-1000), skip_segmentation=False):
         super().__init__()
-        layer_channels_enc = tuple([4 if x == 3 else x for x in layer_channels])
+        if skip_segmentation:
+            self.skip_segmentation = True 
+            layer_channels_enc = layer_channels
+        else:
+            layer_channels_enc = tuple([4 if x == 3 else x for x in layer_channels])
+            self.skip_segmentation = False
         self.encoder        = Encoder(layer_channels = layer_channels_enc,       skip_layers=skip_layers, img_sz=img_sz)
         sc = 2**(len(layer_channels)-1)
         img_sz_decode = [im//sc for im in img_sz]
         self.decoder        = Single_Decoder(layer_channels = layer_channels[::-1], skip_layers=skip_layers, img_sz=img_sz_decode)
     def forward(self, photo, segmentation):
-        x = torch.cat([photo, segmentation[:,0:1,:,:]], axis=1)
+        x = photo if self.skip_segmentation else torch.cat([photo, segmentation[:,0:1,:,:]], axis=1)
         y = self.encoder(x)
         z = self.decoder(y)
         return z
@@ -281,7 +286,7 @@ class VGG_SDTCNN(nn.Module):
         return z
 
 class VGG_discriminator(nn.Module):
-    def __init__(self,layer_channels=(3,64), image_sz=(512,384),lay=28):
+    def __init__(self,layer_channels=None, image_sz=(512,384),lay=28):
         super().__init__()
         exp = 2**4
         kernel_sz = (image_sz[0]//exp, image_sz[1]//exp)

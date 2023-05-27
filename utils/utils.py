@@ -11,10 +11,11 @@ import re
 import torchvision
 from torch import tensor
 from tqdm import tqdm
+from PIL import Image
 sys.path.append('utils') # important
 try:
     from dataset import A_transforms, A_Norm, AddDilatedBackground, ToErodedMask, domain_transfer_dataset, RandomCrop
-    from layers import DTCNN, SDTCNN, GAN_discriminator, VGGPerceptualLoss,VGG_SDTCNN,VGG_discriminator
+    from layers import DTCNN, SDTCNN, GAN_discriminator, VGGPerceptualLoss, VGG_SDTCNN,VGG_discriminator
 except:
     from utils.dataset import A_transforms, A_Norm, AddDilatedBackground, ToErodedMask, domain_transfer_dataset, RandomCrop
     from utils.layers import DTCNN, SDTCNN, GAN_discriminator, VGGPerceptualLoss,VGG_SDTCNN,VGG_discriminator
@@ -121,14 +122,10 @@ def create_folder_and_resize_photo(new_folder_name:str, image_folder:str, resize
 def get_loss(generated_image:tensor, 
              target_image:tensor,
              ssim=0,
-             lpips=0, 
-             psnr=0):
-    loss = F.l1_loss(generated_image, target_image)
-    if type(ssim)!=type(0): loss += (1  - ssim(generated_image, target_image) )/10 #1-ssim #lpips, #1/(1+|psnr|) 
-    if type(lpips)!=type(0): loss += lpips(generated_image, target_image)/10 
-    if type(psnr)!=type(0): loss += 1/(1 + psnr(generated_image, target_image) )/10 
-    tot_loss = loss
-    return tot_loss 
+             use_ssim=True):
+    if use_ssim: loss = 1 - ssim(generated_image, target_image)
+    else:                   loss = F.l1_loss(generated_image, target_image)
+    return loss 
 
 def GAN_get_loss(label:tensor, 
                  predict_label:tensor):
@@ -178,7 +175,6 @@ def get_model(model_path:str, device:device):
 
 def get_dataloader( root_dir:str,
                     usage="train", 
-                    bg_mode="train", #train,test,255
                     validation_length=10, 
                     BATCH_SIZE=3, 
                     mask_erosion=0, 
@@ -195,15 +191,14 @@ def get_dataloader( root_dir:str,
     else: trms.append( A_Norm() )
     trms = transforms.Compose(trms)
     
-    dataset = domain_transfer_dataset(root_dir, transform=trms, background_mode=bg_mode, specific_background_path=special_img, subset=subset)
+    dataset = domain_transfer_dataset(root_dir, transform=trms, specific_background_path=special_img, subset=subset)
     train_set, val_set = torch.utils.data.random_split(dataset, [len(dataset)-validation_length,validation_length], generator=torch.Generator().manual_seed(0))
     
     active_dataset = train_set
     is_shuffle = True
-    if usage != "train" and usage != "train2":
+    if usage != "train": 
         active_dataset = val_set
         is_shuffle = False
-
     dataset_loader = torch.utils.data.DataLoader(active_dataset, batch_size=BATCH_SIZE, shuffle=is_shuffle, num_workers=4)
     return dataset_loader
 
@@ -211,29 +206,23 @@ def train_n_epochs(root_dir:str,
                    model:DTCNN,#OR SDTCNN 
                    train_info:dict, 
                    save_folder="-1", 
-                   update_dataset_per_epoch = True, 
                    extra_info={0:0}):
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
-    bg_mode = "255" if "bg255" in extra_info else "train"
 
-    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
     ld = len(dataset_loader)
 
-    #VGG_loss = VGGPerceptualLoss(extra_info['resize'], device)
-    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
-    psnr = torchmetrics.PeakSignalNoiseRatio().to(device) if "psnr" in extra_info else 1
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device) if "lpips" in extra_info else 1
-
+    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device)
     optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
+
     writer = SummaryWriter(save_folder)
     if save_folder=="-1": writer = SummaryWriter()
     
     for epoch in range(train_info['epochs']):   
-        if update_dataset_per_epoch and epoch > 0:  dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+        dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
 
         for ix, x in enumerate(tqdm(dataset_loader)):
             i_scalar = epoch*ld + ix
@@ -241,78 +230,27 @@ def train_n_epochs(root_dir:str,
             
             input_image, segmentation_image, target_image = get_loader_vals(x, device)
             generated_image = model(input_image, segmentation_image)
-            loss = get_loss(generated_image, target_image, ssim=ssim, lpips=lpips, psnr=psnr)
-            #loss = VGG_loss(generated_image, target_image, extra_info['feature_layers'])
+            loss = get_loss(generated_image, target_image, ssim, use_ssim=True)
 
             writer.add_scalar('Training Loss', loss, global_step=i_scalar)
             loss.backward()
             optimizer.step()
+
+        scheduler.step()
+        for pp in optimizer.param_groups:
+            learning_rate = pp['lr']
 
         grid1 = torchvision.utils.make_grid((input_image+1)/2)
         grid2 = torchvision.utils.make_grid(generated_image)
         grid3 = torchvision.utils.make_grid(target_image)
         grid = torch.concatenate((grid1,grid2,grid3),dim=1)
         writer.add_image('images', grid, global_step=epoch)
-        torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
+        writer.add_scalar('learning rate', learning_rate, global_step=epoch)
+        if epoch % 2 == 0:
+            torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
         
         if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
-            info_file = os.path.join(save_folder,'model_info.json')
-            with open(info_file, 'w') as outfile:
-                json.dump(info, outfile)
-    writer.close()
-
-def train_n_epochs_twice(root_dir:str, 
-                         model:DTCNN,#OR SDTCNN 
-                         train_info:dict, 
-                         save_folder="-1", 
-                         update_dataset_per_epoch = True, 
-                         extra_info={0:0}):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    bg_mode = "255" if "bg255" in extra_info else "train"
-
-    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
-    ld = len(dataset_loader)
-
-    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device) if "ssim" in extra_info else 1
-    psnr = torchmetrics.PeakSignalNoiseRatio().to(device) if "psnr" in extra_info else 1
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        lpips = LearnedPerceptualImagePatchSimilarity(net_type='vgg').to(device) if "lpips" in extra_info else 1
-
-    optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
-    writer = SummaryWriter(save_folder)
-    if save_folder=="-1": writer = SummaryWriter()
-    
-    for epoch in range(train_info['epochs']):   
-        if update_dataset_per_epoch and epoch > 0: dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
-            
-        for ix, x in enumerate(tqdm(dataset_loader)):
-            i_scalar = epoch*ld + ix
-            optimizer.zero_grad()
-            
-            input_image, segmentation_image, target_image = get_loader_vals(x, device)
-            generated_image = model(input_image, segmentation_image)
-            generated_image2 = model(generated_image*2-1, segmentation_image)
-            
-            loss = get_loss(generated_image, target_image, ssim=ssim, lpips=lpips, psnr=psnr)
-            loss += 0.2*get_loss(generated_image2, target_image, ssim=ssim, lpips=lpips, psnr=psnr)
-
-            writer.add_scalar('Training Loss', loss, global_step=i_scalar)
-            loss.backward()
-            optimizer.step()
-
-        grid1 = torchvision.utils.make_grid((input_image+1)/2)
-        grid2 = torchvision.utils.make_grid(generated_image)
-        grid3 = torchvision.utils.make_grid(generated_image2)
-        grid4 = torchvision.utils.make_grid(target_image)
-        grid  = torch.concatenate((grid1,grid2,grid3,grid4),dim=1)
-        writer.add_image('images', grid, global_step=epoch)
-        torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
-        
-        if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
+            info = {'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
             info_file = os.path.join(save_folder,'model_info.json')
             with open(info_file, 'w') as outfile:
                 json.dump(info, outfile)
@@ -323,27 +261,27 @@ def train_GAN_epochs(root_dir:str,
                    discriminator:GAN_discriminator,
                    train_info:dict, 
                    save_folder="-1", 
-                   update_dataset_per_epoch = True, 
                    extra_info={0:0}):
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = model.to(device)
-    
     discriminator = discriminator.to(device)
-    bg_mode = "255" if "bg255" in extra_info else "train"
 
     BATCH_SIZE = train_info['batch_size']
-    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=BATCH_SIZE, usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
-    ld = len(dataset_loader)
+    dataset_loader = get_dataloader(root_dir, BATCH_SIZE=BATCH_SIZE, usage="train", bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
+    ld = len(dataset_loader)-1
 
-    ssim,psnr,lpips = 1,1,1
+    ssim = torchmetrics.StructuralSimilarityIndexMeasure(data_range=1.0,).to(device)
     gen_optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
     disc_optimizer = optim.Adam(discriminator.parameters(), lr=train_info['lr'])
+    gen_scheduler = torch.optim.lr_scheduler.ExponentialLR(gen_optimizer, gamma=0.9)
+    disc_scheduler = torch.optim.lr_scheduler.ExponentialLR(disc_optimizer, gamma=0.9)
 
     writer = SummaryWriter(save_folder)
     if save_folder=="-1": writer = SummaryWriter()
+    disc_loss_save = 0
     for epoch in range(train_info['epochs']):   
-        dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=(ld-1)*BATCH_SIZE)    
+        dataset_loader = get_dataloader(root_dir, BATCH_SIZE=train_info['batch_size'], usage="train", bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=ld*BATCH_SIZE)    
 
         for ix, x in enumerate(tqdm(dataset_loader)):
             i_scalar = epoch*ld + ix
@@ -353,116 +291,46 @@ def train_GAN_epochs(root_dir:str,
             
             real_label = discriminator(target_image)
             gen_label = discriminator(generated_image)
-            real_target = torch.ones((BATCH_SIZE,1),requires_grad=True).to(device)
-            gen_target = torch.zeros((BATCH_SIZE,1),requires_grad=True).to(device)
+            real_target = torch.ones((BATCH_SIZE,1,1,1),requires_grad=True).to(device)
+            gen_target = torch.zeros((BATCH_SIZE,1,1,1),requires_grad=True).to(device)
 
-            if i_scalar%3==0: 
+            if i_scalar%1==0: 
                 disc_optimizer.zero_grad()
-                disc_loss =  GAN_get_loss(gen_label, gen_target)/1500
-                disc_loss += GAN_get_loss(real_label, real_target)/1500
+                disc_loss =  GAN_get_loss(gen_label, gen_target)/150
+                disc_loss += GAN_get_loss(real_label, real_target)/150
+                disc_loss_save = disc_loss.item()
                 disc_loss.backward(retain_graph=True)
                 disc_optimizer.step()
 
             gen_optimizer.zero_grad()
-            gen_loss = get_loss(generated_image, target_image, ssim=ssim, lpips=lpips, psnr=psnr)   
-            gen_loss += GAN_get_loss(gen_label.detach(), real_target)/1500
+            gen_loss = GAN_get_loss(gen_label.detach(), real_target)/1500
+            gan_generator_onlyganloss_save = gen_loss.item()
+            gen_loss += get_loss(generated_image, target_image, ssim=ssim, use_ssim=True)   
+            gan_loss_save = gen_loss.item()
 
-            writer.add_scalar('Training Loss', gen_loss.item(), global_step=i_scalar)
+            writer.add_scalars('Losses',{'gan_loss_save':gan_loss_save,'only_generator_ganloss':gan_generator_onlyganloss_save, 'discriminator':disc_loss_save}, global_step=i_scalar)
             gen_loss.backward()   
             gen_optimizer.step()
+        gen_scheduler.step()
+        disc_scheduler.step()
+        for pp in gen_optimizer.param_groups:
+            gen_learning_rate = pp['lr']
+        for pp in disc_optimizer.param_groups:
+            disc_learning_rate = pp['lr']
 
         grid1 = torchvision.utils.make_grid((input_image+1)/2)
         grid2 = torchvision.utils.make_grid(generated_image)
         grid3 = torchvision.utils.make_grid(target_image)
         grid = torch.concatenate((grid1,grid2,grid3),dim=1)
-        writer.add_image('images', grid, global_step=epoch)
+        writer.add_image('images', grid, global_step=epoch)       
+        writer.add_scalar('learning rate', gen_learning_rate, global_step=epoch)
+        writer.add_scalar('learning rate', disc_learning_rate, global_step=epoch)
+
         if epoch % 2 == 0:
             torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
             torch.save(discriminator.state_dict(), save_folder + "/disc"+str(epoch)+".pth")
         if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
-            info_file = os.path.join(save_folder,'model_info.json')
-            with open(info_file, 'w') as outfile:
-                json.dump(info, outfile)
-    writer.close()
-
-def train_GAN2_epochs(root_dir:str, 
-                   model:SDTCNN, 
-                   discriminator:GAN_discriminator,
-                   train_info:dict, 
-                   save_folder="-1", 
-                   update_dataset_per_epoch = True, 
-                   extra_info={0:0}):
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model_path = "/home/isac/data/tensorboard_info/20230422-185344vgg19stdnn_lay35_l1_gan/test8.pth"
-    disc_path = "/home/isac/data/tensorboard_info/20230422-185344vgg19stdnn_lay35_l1_gan/disc8.pth"
-    
-    model = VGG_SDTCNN(lay=35).to(device)
-    model.load_state_dict( torch.load(model_path, map_location=torch.device(device)) )  
-
-    discriminator = VGG_discriminator(lay=28).to(device)
-    discriminator.load_state_dict( torch.load(disc_path, map_location=torch.device(device)) )  
-
-    bg_mode = "255" if "bg255" in extra_info else "train"
-    BATCH_SIZE = train_info['batch_size']
-    root_dir_viton = "/home/isac/data/viton_hd"
-    root_dir_wild = "/home/isac/data/f550k"
-    dataset_loader_viton = get_dataloader(root_dir_viton, BATCH_SIZE=BATCH_SIZE, usage="train", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'])    
-    ld = len(dataset_loader_viton)-1
-    ssim,psnr,lpips = 1,1,1
-    gen_optimizer = optim.Adam(model.parameters(), lr=train_info['lr'])
-    disc_optimizer = optim.Adam(discriminator.parameters(), lr=train_info['lr'])
-
-    writer = SummaryWriter(save_folder)
-    if save_folder=="-1": writer = SummaryWriter()
-    for epoch in range(train_info['epochs']):   
-        dataset_loader_viton = get_dataloader(root_dir_viton, BATCH_SIZE=BATCH_SIZE, usage="train2", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=ld*BATCH_SIZE)    
-        dataset_loader_wild = get_dataloader(root_dir_wild, BATCH_SIZE=BATCH_SIZE, usage="train2", bg_mode=bg_mode, bg_dilation=extra_info['dilation'], mask_erosion=extra_info['erosion'],subset=ld*BATCH_SIZE)    
-
-        for ix, datas in tqdm(enumerate(zip(dataset_loader_viton, dataset_loader_wild)),total=ld): # fail with dataloder + iter
-            viton_data = datas[0]
-            wild_data = datas[1]
-            i_scalar = epoch*ld + ix
-            input_image_viton, segmentation_image_viton, target_image_viton = get_loader_vals(viton_data, device)
-            input_image_wild, segmentation_image_wild, target_image_wild = get_loader_vals(wild_data, device)
-
-            generated_image_viton = model(input_image_viton, segmentation_image_viton)
-            generated_image_wild = model(input_image_wild, segmentation_image_wild)
-            gen_viton_label = discriminator(generated_image_viton)
-            gen_wild_label = discriminator(generated_image_wild)
-            real_target = torch.ones((BATCH_SIZE,1),requires_grad=True).to(device)
-            gen_target = torch.zeros((BATCH_SIZE,1),requires_grad=True).to(device)
-
-            if i_scalar%3==0: 
-                disc_optimizer.zero_grad()
-                real_viton_label = discriminator(target_image_viton)
-                disc_loss  = GAN_get_loss(real_viton_label, real_target)/1500
-                disc_loss += GAN_get_loss(gen_viton_label,  gen_target)/1500
-                disc_loss += GAN_get_loss(gen_wild_label,   gen_target)/5000
-                disc_loss.backward(retain_graph=True)
-                disc_optimizer.step()
-            
-            gen_optimizer.zero_grad()
-            gen_loss = get_loss(generated_image_viton, target_image_viton, ssim=ssim, lpips=lpips, psnr=psnr)   
-            gen_loss += GAN_get_loss(gen_viton_label.detach(), real_target)/1500
-            gen_loss += GAN_get_loss(gen_wild_label.detach(), real_target)/4000
-
-            writer.add_scalar('Training Loss', gen_loss.item(), global_step=i_scalar)
-            gen_loss.backward()   
-            gen_optimizer.step()
-
-        grid1 = torchvision.utils.make_grid((input_image_wild+1)/2)
-        grid2 = torchvision.utils.make_grid(generated_image_wild)
-        grid3 = torchvision.utils.make_grid(target_image_wild)
-        grid = torch.concatenate((grid1,grid2,grid3),dim=1)
-        writer.add_image('images', grid, global_step=epoch)
-
-        if epoch % 2 == 0:
-            torch.save(model.state_dict(), save_folder + '/test'+str(epoch)+'.pth')
-            torch.save(discriminator.state_dict(), save_folder + "/disc"+str(epoch)+ ".pth")
-        if epoch == 0:
-            info = {'lr':train_info['lr'], 'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'update_dataset_per_epoch':update_dataset_per_epoch,  'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
+            info = {'batch_size':train_info['batch_size'], 'epochs':train_info['epochs'], 'layer_channels':extra_info['layer_channels'], 'skip_layers':extra_info['skip_layers'], 'dilation':extra_info['dilation'], 'erosion':extra_info['erosion']}
             info_file = os.path.join(save_folder,'model_info.json')
             with open(info_file, 'w') as outfile:
                 json.dump(info, outfile)
@@ -478,18 +346,24 @@ def get_psnr_lpips_ssim(target_data:tensor,
     ssim_tot = 0 
     lpips_tot = 0
     psnr_tot = 0
-    for x1, x2 in tqdm(zip(target_data, generated_data),total=len(target_data)):
+    for i, (x0, x2) in tqdm(enumerate(zip(target_data, generated_data)),total=len(target_data)):
+        if i == 0: 
+            x1 = x0
+            continue
         target               = x1['target'].to(device)
-        photo                = x2['photo'].to(device)
+        photo                = x2['photo'].to(device)        
         segmentation         = x2['segmentation'].to(device)
         generated_img        = model(photo, segmentation)
+        #generated_img = (photo+1)/2   # use if generating score for base model
         ssim_tot  += score_and_device['ssim'](target, generated_img).item()
         lpips_tot += score_and_device['lpips'](target, generated_img).item()
         psnr_tot  += score_and_device['psnr'](target, generated_img).item()
+        
+        x1 = x0
 
-    ssim_avg  = ssim_tot/len(target_data)
-    lpips_avg = lpips_tot/len(target_data)
-    psrn_avg  = psnr_tot/len(target_data)
+    ssim_avg  = ssim_tot/(len(target_data)-1)
+    lpips_avg = lpips_tot/(len(target_data)-1)
+    psrn_avg  = psnr_tot/(len(target_data)-1)
     scores = {'ssim_'+name_extend:ssim_avg, 'lpips_'+name_extend:lpips_avg, 'psnr_'+name_extend:psrn_avg}
     return scores
 
@@ -503,6 +377,7 @@ def get_fid_score(target_data:tensor,
         photo          = x2['photo'].to(device)
         segmentation   = x2['segmentation'].to(device)
         generated_img  = model(photo, segmentation)
+        #generated_img = (photo+1)/2 # use if generating score for base model
         score_and_device['fid'].update(target, real=True)
         score_and_device['fid'].update(generated_img, real=False)
 
@@ -519,6 +394,8 @@ def get_metrics(model_path:str,
     device = score_and_device['device']
     model = get_model(model_path, device)
     model.eval()
+
+    #model = 0 # use to generate score for base model
     with torch.no_grad():
         scores1 = get_psnr_lpips_ssim(viton_500, viton_500, model, score_and_device, "viton")
         scores2 = get_psnr_lpips_ssim(viton_500, f550k_500, model, score_and_device, "f550k")
@@ -527,13 +404,14 @@ def get_metrics(model_path:str,
     else:    
         fid_score = get_fid_score(viton_5000, f550k_5000, model, score_and_device)
     scores = scores1 | scores2 | fid_score
-    file = os.path.join( os.path.dirname(model_path), 'scores1.json')#scores1 == new test
+    file = os.path.join( os.path.dirname(model_path), 'scores4.json')#scores1 == new test
     with open(file, 'w') as outfile:
         json.dump(scores, outfile)
 
 def tensor_to_saveable_img(tensor:tensor):
     if torch.cuda.is_available():
         tensor = tensor.detach().cpu()
+    if len(tensor.shape) == 4: tensor=tensor[0]
     y = torch.transpose(tensor, 0, 2)
     y = torch.transpose(y, 0, 1)
     y = np.array(y)
@@ -570,126 +448,95 @@ def generate_images(dataloader:DataLoader,
     s1 = os.path.join(save_folder,"photo")
     s2 = os.path.join(save_folder,"segmentation")
 
+    with torch.no_grad():
+        for x in tqdm(dataloader):
+            input_image, segmentation_image, target_image = get_loader_vals(x, device)
+            generated_images = model(input_image, segmentation_image)
+            input_image = (input_image+1)/2 
+            segmentation_image = (segmentation_image+1)/2 
 
-    for x in tqdm(dataloader):
-        input_image, segmentation_image, target_image = get_loader_vals(x, device)
-        generated_images = model(input_image, segmentation_image)
-        input_image = (input_image+1)/2 
-        segmentation_image = (segmentation_image+1)/2 
-
-        if photo_mode==0:
-            grid0 = torchvision.utils.make_grid(segmentation_image)
-            grid1 = torchvision.utils.make_grid(input_image)
-            grid2 = torchvision.utils.make_grid(target_image)
-            grid3 = torchvision.utils.make_grid(generated_images)
-            grid_tot = torch.concat((grid0,grid1,grid2,grid3),dim=1)
-            save_images(save_folder, grid_tot, as_batch=True)
-            ix+=1
-        elif photo_mode == 1:
-            for i in range(segmentation_image.shape[0]):
-                img1 = segmentation_image[i,:,:,:]
-                img2 =        input_image[i,:,:,:]
-                img3 =       target_image[i,:,:,:]
-                img4 =   generated_images[i,:,:,:]
-                grid0 = torchvision.utils.make_grid(img1)
-                grid1 = torchvision.utils.make_grid(img2)
-                grid2 = torchvision.utils.make_grid(img3)
-                grid3 = torchvision.utils.make_grid(img4)
-                grid_tot1 = torch.concat((grid0,grid1),dim=1)
-                grid_tot2 = torch.concat((grid2,grid3),dim=1)
-                grid_tot = torch.concat((grid_tot1,grid_tot2),dim=2)
-                save_images(save_folder, grid_tot, as_batch=True)
+            if photo_mode==0:
+                for i in range(segmentation_image.shape[0]):
+                    grid0 = torchvision.utils.make_grid(segmentation_image)
+                    grid1 = torchvision.utils.make_grid(input_image)
+                    grid2 = torchvision.utils.make_grid(target_image)
+                    grid3 = torchvision.utils.make_grid(generated_images)
+                    grid_tot = torch.concat((grid0,grid1,grid2,grid3),dim=2)
+                    save_images(save_folder, grid_tot, as_batch=True)
+                    ix+=1
+            elif photo_mode == 1:
+                for i in range(segmentation_image.shape[0]):
+                    img1 = segmentation_image[i,:,:,:]
+                    img2 =        input_image[i,:,:,:]
+                    img3 =       target_image[i,:,:,:]
+                    img4 =   generated_images[i,:,:,:]
+                    grid0 = torchvision.utils.make_grid(img1)
+                    grid1 = torchvision.utils.make_grid(img2)
+                    grid2 = torchvision.utils.make_grid(img3)
+                    grid3 = torchvision.utils.make_grid(img4)
+                    grid_tot1 = torch.concat((grid0,grid1),dim=1)
+                    grid_tot2 = torch.concat((grid2,grid3),dim=1)
+                    grid_tot = torch.concat((grid_tot1,grid_tot2),dim=2)
+                    save_images(save_folder, grid_tot, as_batch=True)
+                    ix+=1
+            elif photo_mode == 2:
+                save_images(save_folder, input_image, as_batch=False)
                 ix+=1
-        elif photo_mode == 2:
-            save_images(save_folder, input_image, as_batch=False)
-            ix+=1
-        elif photo_mode == 3:
-            save_images(s1, generated_images, as_batch=False)
-            save_images(s2, segmentation_image, as_batch=False)
-            ix+=1
-        elif photo_mode == 4:
-            save_images(save_folder, generated_images, as_batch=False)
-            ix+=1
-        else: break
-        if ix > max_images-2 and max_images > 0: break
+            elif photo_mode == 3:
+                save_images(s1, generated_images, as_batch=False)
+                save_images(s2, segmentation_image, as_batch=False)
+                ix+=1
+            elif photo_mode == 4:
+                save_images(save_folder, generated_images, as_batch=False)
+                ix+=1
+            else: break
+            if ix > max_images-2 and max_images > 0: break
 
-def compare_bg_images(dataloader:DataLoader, save_folder, sub_img=(-1,0,0,0), dim='vertical'):
-    for x in dataloader:
-        break
-    if dim=='vertical': dim = 1
-    else: dim = 2
-    target = x['target'].to(float)
-    mask = (x['segmentation']+1)/2
-    mask.to(int)
-    background = x['background'].to(float)
-    output = target*mask + background*(1-mask)
-    if sub_img[0]>=0:
-        output = output[:,:,sub_img[0]:sub_img[1],sub_img[2]:sub_img[3]]
-        target = target[:,:,sub_img[0]:sub_img[1],sub_img[2]:sub_img[3]]
+def generate_images2(dataloader:DataLoader,
+                    model_path1:str,
+                    model_path2:str,
+                    save_folder:str,
+                    max_images=-1):
+    if not os.path.isdir(save_folder): os.mkdir(save_folder) 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model1 = get_model(model_path1, device)
+    model1.eval()
 
-    for i in range(x['target'].shape[0]):
-        target1      = target[    i, :, :, :]
-        output1      = output[    i, :, :, :]
+    model2 = get_model(model_path1, device)
+    model2.eval()
+
+    with torch.no_grad():
+        for ix, x in enumerate(dataloader):
+            input_image, segmentation_image, target_image = get_loader_vals(x, device)
+            generated_images1 = model1(input_image, segmentation_image)
+            generated_images2 = model2(input_image, segmentation_image)
+            input_image = (input_image+1)/2 
+            segmentation_image = (segmentation_image+1)/2 
+
+            for i in range(segmentation_image.shape[0]):
+                grid0 = torchvision.utils.make_grid(segmentation_image)
+                grid1 = torchvision.utils.make_grid(input_image)
+                grid2 = torchvision.utils.make_grid(target_image)
+                grid3 = torchvision.utils.make_grid(generated_images1)
+                grid4 = torchvision.utils.make_grid(generated_images2)
+                grid_tot = torch.concat((grid0,grid1,grid2,grid3,grid4),dim=2)
+                save_images(save_folder, grid_tot, as_batch=True)
+            if ix >= max_images: break
         
-        grid_tot = torch.cat((target1, output1),dim=dim)
-        save_images(save_folder, grid_tot, as_batch=True)
-
-def concat_save_2imgs(save_path:str, img1:str, img2:str, dim='vertical'):
-    if dim=='vertical': dim = 0
-    else: dim = 1
-    img1 = io.imread(img1)[:,:,:3]
-    img2 = io.imread(img2)[:,:,:3]
-    try:
-        grid = np.concatenate((img1,img2),axis=dim)
-    except: 
-        grid = np.concatenate((img1,img2),axis=1-dim)
-    plt.imsave(save_path, grid)
-
-#fun remove later
-def print_np_img(img, space = 4):
-
-    if np.max(img)<2: img *= 255
-    img = img[:,:,0].astype(int)
-    Y, X = img.shape
+def concat_images(image_folder:str, save_path:str, row_size = -1):
     
-    format_str1 = ""
-    for x in range(X):
-        format_str1 += "{:<{}}"
-    format_str = format_str1.format
-    
-    spaces = [space]*X
-    for y in range(Y):
-        im_row = list(img[y,:]) 
-        params = [elem for pair in zip(im_row, spaces) for elem in pair]
-        print(format_str(*params))
+    image_list = []
+    files = sorted(os.listdir(image_folder))
+    for filename in files:
+        image_path = os.path.join(image_folder, filename)
+        image = torchvision.io.read_image(image_path)
+        image_list.append(image)
+    image_tensor = torch.stack(image_list)
+    if row_size == -1: row_size = int(len(image_list)**1)
+    if row_size == 0: row_size = int(len(image_list)**2)
+    grid = torchvision.utils.make_grid(image_tensor, nrow=row_size)
+    numpy_image = grid.numpy()
+    numpy_image = np.transpose(numpy_image, (1, 2, 0))
+    pil_image = Image.fromarray(numpy_image)
+    pil_image.save(save_path)
 
-def print_colored_box(arr):
-    c = [92,93,91,95,96,94,97,98,2,90,7]
-    imin = 0
-    cd = {}
-    for i in c:
-        imax = imin + 255//len(c)
-        cd[(imin,imax)]=str(i)
-        imin=imax
-
-    bc = '1'
-    b_char = '\u2588'
-    for i in arr:
-        bg_code='1'
-        for x in cd:
-            if i >=x[0] and i < x[1]:
-                bg_code = cd[x]
-        top_border = f'\x1b[{bc};{bg_code}m{b_char}\x1b[0m'
-        print(top_border,end="")
-    print("")
-
-def print_colored_img(arr,scale=3):
-    arr = arr[:,:,0]
-    Y,X = arr.shape
-    Y = [y for y in range(Y)][::scale]
-    
-    for y in Y:
-        arr2 = list(arr[y,:].astype(int))[::scale]
-        print_colored_box(arr2)
-
-#add scheduler and run new 

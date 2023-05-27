@@ -1,5 +1,0 @@
-git add data/create_dataset.py data/dataset.py data/test_dataloading.py data/utils.py model/layers.py model/test_networks_and_layers.py generate_images.py run_metrics_tests.py train.py
-
-
-
-git commit -m "generate_images.py donce (debugging needed but for later when have trained model), dataset.py slightly updated, train.py very easy to modify now"

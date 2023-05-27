@@ -3,78 +3,104 @@ import torch
 import torchvision
 from skimage import io, transform
 import matplotlib.pyplot as plt
-from utils.dataset import CropAndPad, Outline, A_Norm
+from utils.dataset import CropAndPad, Outline, A_Norm, ToErodedMask,file_names_dataset, A_transforms
 import albumentations as A
 from torchvision import transforms
 import numpy as np
-from utils.utils import print_colored_img,print_np_img, get_dataloader, generate_images, write_csv, combine_csv, compare_bg_images, concat_save_2imgs, get_model, tensor_to_saveable_img
-root_dir   = '/home/isac/data/viton_hd'
-model_path = "/home/isac/data/tensorboard_info/20230402-163312{'dilation': 100, 'erosion': 0, 'p': 0.25, 'skip_layers': [0, 1, 2, 3], 'layer_channels': (3, 64, 128, 256, 512), 'function': 'train_n_epochs'}/test4.pth"
+from utils.utils import get_dataloader, generate_images, write_csv, combine_csv, compare_bg_images, concat_save_2imgs, get_model, tensor_to_saveable_img
+import albumentations as A
+from PIL import Image
+model_path = "/home/isac/data/final/seg_gan/test38.pth"
 save_folder = '/home/isac/data/use_model_output'
 
-img1 = "/home/isac/data/zalando/photo/img0.jpg"
-img2 = "/home/isac/data/zalando/segmentation/img0.png"
-dataloader = get_dataloader(root_dir=root_dir,
-                            usage='use_mask',
-                            bg_mode="train",
-                            validation_length=50000,
-                            BATCH_SIZE=1,
-                            bg_dilation=100,
-                            mask_erosion=0,
-                    #TODO:
-                    #to improve: 1) lighting (hopefully shado fixes it),  2) (backup plan) HDR imaging-luminence estimation (relighting related) (image->hdr)
-                    # get rid of this dataloader, and torch.utils.data.DataLoader(
-                    # use only neccesary/ data extraction  (priority on 1 image but else multiple, no batch size should be used)   
-                    #A.ISONoise(p=1), this augmentation usefull. look up what ISO does!
-                    #to improve: 1) lighting (hopefully shado fixes it),  2) (backup plan) HDR imaging-luminence estimation (relighting related) (image->hdr)
-                    # if doesn' t got wll can use GANloss
-)
 
-#generate_images(dataloader, model_path, save_folder, max_images=4, photo_mode=4)#photo_mode 0,1,2, max images = -1 for generate all photos
-#compare_bg_images(dataloader,save_folder)
-#concat_save_2imgs(save_path="/home/isac/data/zalando/output/img5.png" , img1="/home/isac/data/zalando/output/img1.png", img2="/home/isac/data/viton_hd/photo/0.jpg")
+class OWN(object): # 
+    def __call__(self, sample): 
+        photo_img        = sample['photo']#uint8 format
+        if np.max(photo_img)<2: photo_img = np.array(photo_img*255,dtype=np.uint8)
+
+        trms = [
+            A.Defocus(p=1,radius=(1,4)),    
+            #A.Downscale(p=1, scale_min=0.75, scale_max=0.8,interpolation=cv2.INTER_NEAREST),
+            #A.ISONoise(p=1),
+            #A.Sharpen(p=1,alpha=(0.5,0.5)),
+            #A.RandomBrightnessContrast(p=1,brightness_limit=0.4, contrast_limit=0.4),
+        ]
+        transform = A.Compose(trms)
+        augmented = transform(image=photo_img)
+        photo_img = augmented["image"]
+        
+        if np.max(photo_img)>2.00: photo_img=np.array(photo_img,dtype=np.float64)/255
+        photo_img[photo_img<0]=0
+        photo_img[photo_img>1]=1
+        sample['photo'] = photo_img
+        return sample
 
 
 
-#code below have some errors still, and only take in image and not folder
+
+#To generate sample from validation set when training go to "use_model.py"
+
+#use files to an img or or folder
+photo_str = "/home/isac/data/zalando/photo/img17.jpg"
+segmentation_str = "/home/isac/data/zalando/segmentation/img17.png"
+
+#set max images or -1 for generating for all images
+MAX_IMAGES = 4
+
+
+
+
+
+if os.path.isdir(photo_str): 
+    files = sorted(os.listdir(photo_str))
+    photo_str = [os.path.join(photo_str, file) for file in files]
+else: photo_str = [photo_str] 
+
+if os.path.isdir(segmentation_str): 
+    files = sorted(os.listdir(segmentation_str))
+    segmentation_str = [os.path.join(segmentation_str, file) for file in files]
+else: segmentation_str = [segmentation_str] 
+
 if not os.path.isdir(save_folder): os.mkdir(save_folder) 
 ix = len(os.listdir(save_folder))
-save_path = os.path.join(save_folder,"img"+str(ix)+".png")
-
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = get_model(model_path, device)
 model.eval()
+trms = transforms.Compose( [ToErodedMask(0),CropAndPad(),OWN, A_Norm()] )
 
-input_image = io.imread(img1) # even saving image here causes a black screen to be there
-#plt.imsave(save_path,input_image)
-#print_np_img(input_image)
-#print_colored_img(input_image,scale=16)
+for photo_path, segmentation_path in zip(photo_str,segmentation_str):
 
-segmentation_image = io.imread(img2)[:,:,0:3]
+    save_path = os.path.join(save_folder,"img"+str(ix)+".png")
+    ix+=1
+    input_image = io.imread(photo_path)
+    segmentation_image = io.imread(segmentation_path)[:,:,:3]
+    sample = {'photo':input_image, 'segmentation':segmentation_image}
 
-trms = transforms.Compose( [CropAndPad(), A_Norm()] )
-input_image = torch.unsqueeze( trms(input_image), 0).to(device)
-segmentation_image = torch.unsqueeze( trms(segmentation_image), 0).to(device)
+    sample = trms(sample)
+    input_image = sample['photo'].to(device)
+    segmentation_image = sample['segmentation'].to(device)
 
-generated_images = model(input_image, segmentation_image)
-input_image = (input_image+1)/2 
-segmentation_image = (segmentation_image+1)/2 
-
-grid0 = torchvision.utils.make_grid(segmentation_image)
-grid1 = torchvision.utils.make_grid(input_image)
-grid2 = torchvision.utils.make_grid(generated_images)
-grid_tot = torch.concat((grid0,grid1,grid2),dim=1)
-
-#plt.imsave(save_path,tensor_to_saveable_img(grid1))
-#plt.imsave(save_path,tensor_to_saveable_img(grid1))
-#plt.imsave(save_path,tensor_to_saveable_img(grid2))
-#plt.imsave(save_path,tensor_to_saveable_img(grid_tot))
-
-#Outline
+    input_image_aug = torch.unsqueeze( input_image, 0)
+    segmentation_image_aug = torch.unsqueeze( segmentation_image, 0)
+    generated_images = model(input_image_aug, segmentation_image_aug)
+    
+    input_image_aug = (input_image_aug+1)/2 
+    segmentation_image_aug = (segmentation_image_aug+1)/2 
+    
+    bg = torchvision.io.read_image("/home/isac/data/bg_test.jpg")
+    bg = torch.unsqueeze(bg,0).to(device) 
+    #generated_images = segmentation_image_aug*input_image_aug + (1-segmentation_image_aug)*bg #to copy paste background
 
 
+    k=20
+    #segmentation_image_aug, input_image_aug, generated_images = segmentation_image_aug[:,:,:,k:-k], input_image_aug[:,:,:,k:-k], generated_images[:,:,:,k:-k]
+    grid0 = torchvision.utils.make_grid(segmentation_image_aug)
+    grid1 = torchvision.utils.make_grid(input_image_aug)
+    grid2 = torchvision.utils.make_grid(generated_images)
+    grid_tot = torch.concat((grid0,grid1,grid2),dim=2)
 
-
-
-
-
+    img_save = tensor_to_saveable_img(grid_tot)
+    plt.imsave(save_path,img_save)
+    if ix > MAX_IMAGES and MAX_IMAGES > 0: break
+print('complete')

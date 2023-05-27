@@ -21,8 +21,17 @@ def clip(imgs,num=255):
         imgs[x]=img
     return imgs
 
+class file_names_dataset(Dataset):
+    def __init__(self, dir, transform=None):
+        files = os.listdir(dir)
+        self.dir = [os.path.join(dir,file) for file in files]
+    def __len__(self):
+        return len(self.dir)
+    def __getitem__(self, idx):
+        return self.dir[idx]
+
 class domain_transfer_dataset(Dataset):
-    def __init__(self, root_dir, transform=None, subset=-1, background_mode="train", specific_background_path="no"):
+    def __init__(self, root_dir, transform=None, subset=-1, specific_background_path="no"):
         csv_path = os.path.join(root_dir,'dataset.csv') 
         self.has_segmentation = os.path.isfile(csv_path)
         if not self.has_segmentation: csv_path = os.path.join(root_dir,'photo.csv') 
@@ -36,17 +45,12 @@ class domain_transfer_dataset(Dataset):
                 elem_arr[i_add] = csv.iloc[i_add % csv_len] 
             csv_elems = pd.DataFrame(elem_arr, columns=csv.columns)
             csv = pd.concat([csv,csv_elems])
-
         elif subset > 0: csv = csv.iloc[0:subset,:] 
+        
         self.csv = csv
         self.root_dir = root_dir
         self.transform = transform
-        if background_mode == "train": 
-            self.background_dir = os.path.join( os.path.dirname(root_dir), "background_train")
-        elif background_mode == "255": 
-            self.background_dir = os.path.join( os.path.dirname(root_dir), "background_255")
-        else:   
-            self.background_dir = os.path.join( os.path.dirname(root_dir), "background_evaluation")
+        self.background_dir = os.path.join( os.path.dirname(root_dir), "backgrounds")
         self.number_of_backgrounds = len( os.listdir(self.background_dir) )
         self.specific_background_path = specific_background_path
 
@@ -56,8 +60,9 @@ class domain_transfer_dataset(Dataset):
     def __getitem__(self, idx):
         if torch.is_tensor(idx): 
             idx = idx.tolist() 
-        
+
         photo_name        = os.path.join(self.root_dir, 'photo',        self.csv.iloc[idx, 0])
+
         if self.has_segmentation:
             segmentation_name = os.path.join(self.root_dir, 'segmentation', self.csv.iloc[idx, 1])
         else: segmentation_name = photo_name
@@ -66,8 +71,8 @@ class domain_transfer_dataset(Dataset):
         if self.specific_background_path != "no": background_name = self.specific_background_path
 
         photo_img  = io.imread(photo_name)[:,:,0:3]
-        target_img = io.imread(photo_name)
-        background_img = io.imread(background_name) 
+        target_img = io.imread(photo_name)[:,:,0:3]
+        background_img = io.imread(background_name)[:,:,0:3]
         segmentation_img = io.imread(segmentation_name)[:,:,0:3]
         
         sample = {'photo': photo_img, 'target': target_img, 'segmentation': segmentation_img, 'background': background_img}
@@ -260,7 +265,7 @@ class NormalizeMult(object):
         sample['segmentation'] = segmentation_img
         return sample
 
-#classes above except RandomCrop not used after apr 1st, classes mostly with albumentations
+#classes above except RandomCrop are not used in code after apr 1st
 
 class A_transforms(object):
     def __call__(self, sample): 
@@ -271,8 +276,8 @@ class A_transforms(object):
 
         #augment all images
         transform = A.Compose([
-            A.HorizontalFlip(p=0.5),
-            A.VerticalFlip(p=0.25),
+            A.HorizontalFlip(p=0.5),#0.5
+            A.VerticalFlip(p=0.25),#0.25
             ],
             additional_targets={'background': 'image','target':'image','segmentation':'image'}
         )
@@ -285,15 +290,12 @@ class A_transforms(object):
 
         p = 0.25
         #augment input image only:
-        trms = [ # might want to reduce probabilities 
-            #A.Spatter(p=p,std=0.05), # bad
-            #A.RandomShadow(p=0.5,shadow_roi=(0,0,1,1),num_shadows_upper=4,shadow_dimension=4),
-            A.Defocus(p=p,radius=(1,2)),    
+        trms = [ 
+            A.Defocus(p=p,radius=(2,2)),    
             A.Downscale(p=p, scale_min=0.75, scale_max=0.8,interpolation=cv2.INTER_NEAREST),
-            A.ISONoise(p=0.5), #this augmentation usefull. look up what ISO does!
-            #A.RandomSunFlare(p=p, src_radius=125, num_flare_circles_upper=20),
-            A.Sharpen(p=p,alpha=(0.1,0.3)),
-            A.RandomBrightnessContrast(p=0.5,brightness_limit=0.20, contrast_limit=0.20),            
+            A.ISONoise(p=0.5), 
+            A.Sharpen(p=p,alpha=(0.3,0.3)),
+            A.RandomBrightnessContrast(p=0.5,brightness_limit=0.2, contrast_limit=0.2),
         ]
         transform = A.Compose(trms)
         augmented = transform(image=photo_img)
@@ -301,7 +303,7 @@ class A_transforms(object):
         
         #fix data format
         transform = A.Compose([
-                A.Rotate(limit=30,border_mode=cv2.BORDER_CONSTANT), # look at cv2.border modes and variations!
+                A.Rotate(limit=30,border_mode=cv2.BORDER_CONSTANT),
                 A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
                 ToTensorV2(),
             ],
@@ -375,23 +377,29 @@ class AddDilatedBackground(object):
 
 class A_Norm(object):    
     def __call__(self, sample): 
-        if len(sample)>10:
+        if np.max(sample['photo']) > 2: maxp = 255
+        else:                  maxp = 1 
+        if len(sample)<3:
             transform = A.Compose([
-                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), max_pixel_value=maxp),
                 ToTensorV2(),
-            ])
-            augmented = transform(image=sample)['image']
-
-            return augmented
+                ],
+                additional_targets={'segmentation':'image'},
+            )
+            augmented = transform(image=sample['photo'], segmentation=sample['segmentation'])
+            sample['photo']=augmented['image']
+            sample['segmentation']=augmented['segmentation']
+            return sample
 
         transform = A.Compose([
-                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5), max_pixel_value=maxp),
                 ToTensorV2(),
             ],
             additional_targets={'background': 'image','target':'image','segmentation':'image'}
         )
 
         augmented = transform(image=sample['photo'], background=sample['background'], target=sample['target'], segmentation=sample['segmentation'])
+
         sample['photo']          = augmented["image"]
         sample['background']     = augmented["background"]
         sample['target']         = (augmented["target"]+1)/2
@@ -401,16 +409,21 @@ class A_Norm(object):
 class CropAndPad(object):    #todo fix this
     def __init__(self, desired_shape=(512,384)):        
         self.desired_shape = desired_shape
-    def __call__(self, image): 
-        current_shape = image.shape[:2]
-        scale_factor = np.min(np.array(self.desired_shape)/current_shape) #make sure we don't scale 10x5 -> 9x1
-        resized_image = resize(image, (int(current_shape[0]*scale_factor), int(current_shape[1]*scale_factor)),
-                            anti_aliasing=False)
+    def __call__(self, sample): 
+        if len(sample)>3: sample = {'photo': sample}
+        for key in sample:
+            image = sample[key]
+            current_shape = image.shape[:2]
+            scale_factor = np.min(np.array(self.desired_shape)/current_shape) #make sure we don't scale 10x5 -> 9x1
+            resized_image = resize(image, (int(current_shape[0]*scale_factor), int(current_shape[1]*scale_factor)),
+                                anti_aliasing=False)
 
-        pad_amount = [(self.desired_shape[i]-resized_image.shape[i]) for i in range(2)]
-        pad_amount = [pad_amount[0]//2 + pad_amount[0]%2, pad_amount[0]//2, pad_amount[1]//2, pad_amount[1]//2 + pad_amount[1]%2]
-        padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[1]), (pad_amount[2], pad_amount[3]), (0,0)), mode='constant')
-        return padded_image 
+            pad_amount = [(self.desired_shape[i]-resized_image.shape[i]) for i in range(2)]
+            pad_amount = [pad_amount[0]//2 + pad_amount[0]%2, pad_amount[0]//2, pad_amount[1]//2, pad_amount[1]//2 + pad_amount[1]%2]
+            padded_image = np.pad(resized_image, ((pad_amount[0], pad_amount[1]), (pad_amount[2], pad_amount[3]), (0,0)), mode='constant')
+            sample[key] = padded_image
+        if len(sample) == 1: sample = sample['photo']
+        return sample 
         
 class Outline(object):
     def __init__(self, dilate_sz=4):        
